@@ -4,8 +4,12 @@ import json
 import threading
 import time
 
+from client.ui.battlefield import BattlefieldUI
+
 HOST = '127.0.0.1'
 PORT = 4444
+
+ui = BattlefieldUI(player_id="player_1")
 
 def receive_exact(sock, num_bytes):
     """Helper function to read exactly 'num_bytes' from the socket."""
@@ -31,9 +35,17 @@ def listen_for_messages(sock):
             
             if payload_bytes:
                 pdu = json.loads(payload_bytes.decode('utf-8'))
-                print(f"\n[CLIENT] Received PDU:")
-                print(json.dumps(pdu, indent=2))
-                print("> Enter command (PING, READY, EXIT): ", end="", flush=True)
+                
+                if pdu.get("type") == "GAME_STATE_UPDATE":
+                    # Only render if it's the IN_GAME/MULLIGAN state (has 'turn' key)
+                    if "turn" in pdu.get("state", {}):
+                        ui.render(pdu)
+                    else:
+                        print(f"\n[CLIENT] Lobby Status: {pdu['state']}")
+                else:
+                    print(f"\n[CLIENT] Received: {pdu.get('type')}")
+                    
+                print("> Enter command: ", end="", flush=True)
                 
     except (ConnectionResetError, json.JSONDecodeError, struct.error):
         print("\n[CLIENT] Connection closed or network error occurred.")
