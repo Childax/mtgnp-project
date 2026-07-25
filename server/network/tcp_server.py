@@ -1,44 +1,27 @@
 import socket
-import struct
 import json
 import threading
 import argparse
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from shared.network_utils import receive_exact, send_pdu
 
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
 
-def receive_exact(sock, num_bytes):
-    data = bytearray()
-    while len(data) < num_bytes:
-        packet = sock.recv(num_bytes - len(data))
-        if not packet:
-            return None
-        data.extend(packet)
-    return data
-
-def send_pdu(sock, pdu_dict, player_id):
-    try:
-        json_data = json.dumps(pdu_dict).encode('utf-8')
-        message_length = len(json_data)
-        
-        if VERBOSE:
-            print(f"\n[VERBOSE] SENT to Player {player_id} | {message_length} bytes")
-            print(f"[VERBOSE] RAW: {json_data.decode('utf-8')}")
-            
-        framed_message = struct.pack('>I', message_length) + json_data
-        sock.sendall(framed_message)
-    except Exception as e:
-        print(f"\n[SERVER] Failed to send PDU to Player {player_id}: {e}")
-
 def handle_client(conn, addr, player_id):
     print(f"[SERVER] Player {player_id} connected from {addr}")
     try:
         while True:
+            # We use the shared receive function here
             length_prefix = receive_exact(conn, 4)
             if not length_prefix:
                 break
             
+            import struct
             message_length = struct.unpack('>I', length_prefix)[0]
             
             if message_length > 65535:
@@ -58,24 +41,33 @@ def handle_client(conn, addr, player_id):
             try:
                 pdu = json.loads(payload_str)
                 
+                # --- NEW STRICT VALIDATION ---
+                if "type" not in pdu or "seq_num" not in pdu:
+                    print(f"[SERVER] Rejected invalid PDU from Player {player_id}")
+                    error_msg = {
+                        "type": "ERROR",
+                        "error_code": "UNKNOWN_TYPE",
+                        "message": "PDU must contain 'type' and 'seq_num'."
+                    }
+                    send_pdu(conn, error_msg, VERBOSE, f"to Player {player_id}")
+                    continue
+                
                 # Echo PING with PONG
                 if pdu.get("type") == "PING":
                     response = {
                         "type": "PONG", 
-                        "seq_num": pdu.get("seq_num", 0), 
+                        "seq_num": pdu.get("seq_num"), 
                         "timestamp": pdu.get("timestamp", 0)
                     }
-                    send_pdu(conn, response, player_id)
+                    send_pdu(conn, response, VERBOSE, f"to Player {player_id}")
                     
             except json.JSONDecodeError:
                 print(f"[SERVER] Error: Invalid JSON received from Player {player_id}.")
 
     except (ConnectionResetError, OSError):
-        # This catches unexpected drops
         print(f"[SERVER] Network drop detected for Player {player_id}.")
     finally:
         print(f"[SERVER] Player {player_id} disconnected.")
-        # TODO: trigger GAME_OVER logic here if IN_GAME (once implemented in lifecycle)
         conn.close()
 
 def main():
