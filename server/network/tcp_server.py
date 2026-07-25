@@ -4,6 +4,7 @@ import threading
 import argparse
 import sys
 import os
+import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from shared.network_utils import receive_exact, send_pdu
@@ -12,11 +13,28 @@ HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
 
+# Track player sessions and connection states
+sessions = {}
+RECONNECT_TIMEOUT = 60.0 # 60 seconds to reconnect
+
+def trigger_forfeit(player_id):
+    """Called when a player fails to reconnect within the time limit."""
+    if sessions.get(player_id) and not sessions[player_id]["connected"]:
+        print(f"\n[SERVER] Player {player_id} failed to reconnect in time. FORFEIT.")
+        # TODO: Broadcast GAME_OVER (DISCONNECT) to the remaining player
+
 def handle_client(conn, addr, player_id):
     print(f"[SERVER] Player {player_id} connected from {addr}")
+    
+    # Cancel any existing disconnect timer since they just reconnected
+    if player_id in sessions and sessions[player_id].get("timer"):
+        sessions[player_id]["timer"].cancel()
+        print(f"[SERVER] Reconnect timer for Player {player_id} cancelled.")
+        
+    sessions[player_id] = {"conn": conn, "connected": True, "timer": None}
+
     try:
         while True:
-            # We use the shared receive function here
             length_prefix = receive_exact(conn, 4)
             if not length_prefix:
                 break
@@ -41,7 +59,6 @@ def handle_client(conn, addr, player_id):
             try:
                 pdu = json.loads(payload_str)
                 
-                # --- NEW STRICT VALIDATION ---
                 if "type" not in pdu or "seq_num" not in pdu:
                     print(f"[SERVER] Rejected invalid PDU from Player {player_id}")
                     error_msg = {
@@ -52,7 +69,6 @@ def handle_client(conn, addr, player_id):
                     send_pdu(conn, error_msg, VERBOSE, f"to Player {player_id}")
                     continue
                 
-                # Echo PING with PONG
                 if pdu.get("type") == "PING":
                     response = {
                         "type": "PONG", 
@@ -65,9 +81,17 @@ def handle_client(conn, addr, player_id):
                 print(f"[SERVER] Error: Invalid JSON received from Player {player_id}.")
 
     except (ConnectionResetError, OSError):
-        print(f"[SERVER] Network drop detected for Player {player_id}.")
+        print(f"\n[SERVER] Network drop detected for Player {player_id}.")
     finally:
-        print(f"[SERVER] Player {player_id} disconnected.")
+        print(f"[SERVER] Player {player_id} disconnected. Starting {RECONNECT_TIMEOUT}s reconnect timer...")
+        
+        # Flag the player as disconnected and start the countdown
+        if player_id in sessions:
+            sessions[player_id]["connected"] = False
+            timer = threading.Timer(RECONNECT_TIMEOUT, trigger_forfeit, args=[player_id])
+            sessions[player_id]["timer"] = timer
+            timer.start()
+            
         conn.close()
 
 def main():
@@ -80,34 +104,46 @@ def main():
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
     server_sock.bind((HOST, PORT))
-    server_sock.listen(2)
+    
+    server_sock.listen(5) 
     
     print(f"[SERVER] Listening on {HOST}:{PORT}")
     if VERBOSE:
         print("[SERVER] Verbose mode is ON.")
-    print("[SERVER] Waiting for exactly 2 players to connect...")
     
-    clients = []
     try:
-        while len(clients) < 2:
+        # Continuous loop to accept new connections and reconnections
+        while True:
             conn, addr = server_sock.accept()
-            player_id = len(clients) + 1
-            clients.append(conn)
+            assigned_id = None
             
-            thread = threading.Thread(target=handle_client, args=(conn, addr, player_id), daemon=True)
-            thread.start()
+            # 1. Check if there is a disconnected slot we can put this player into
+            for pid, state in sessions.items():
+                if not state["connected"]:
+                    assigned_id = pid
+                    break
             
-        print("[SERVER] Two players connected. Game Server ready. Refusing further connections.")
-        
-        for t in threading.enumerate():
-            if t is not threading.current_thread():
-                t.join()
+            # 2. If no disconnected slots, check if there is room for a brand new player
+            if not assigned_id and len(sessions) < 2:
+                assigned_id = len(sessions) + 1
+                
+            # 3. Route them to the game or reject them
+            if assigned_id:
+                thread = threading.Thread(target=handle_client, args=(conn, addr, assigned_id), daemon=True)
+                thread.start()
+            else:
+                print(f"[SERVER] Rejected connection from {addr}: Lobby full.")
+                error_msg = {
+                    "type": "ERROR",
+                    "error_code": "LOBBY_FULL",
+                    "message": "The server already has two active players."
+                }
+                send_pdu(conn, error_msg, VERBOSE, "to rejected client")
+                conn.close()
                 
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down.")
     finally:
-        for c in clients:
-            c.close()
         server_sock.close()
 
 if __name__ == "__main__":
