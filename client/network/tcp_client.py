@@ -4,10 +4,14 @@ import json
 import threading
 import time
 import argparse
+import sys
 
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
+
+# Global tracker for the heartbeat timeout
+last_pong_time = time.time()
 
 def receive_exact(sock, num_bytes):
     data = bytearray()
@@ -19,33 +23,52 @@ def receive_exact(sock, num_bytes):
     return data
 
 def send_pdu(sock, pdu_dict):
-    json_data = json.dumps(pdu_dict).encode('utf-8')
-    message_length = len(json_data)
-    
-    if VERBOSE:
-        print(f"\n[VERBOSE] SENT to Server | {message_length} bytes")
-        print(f"[VERBOSE] RAW: {json_data.decode('utf-8')}")
+    try:
+        json_data = json.dumps(pdu_dict).encode('utf-8')
+        message_length = len(json_data)
         
-    framed_message = struct.pack('>I', message_length) + json_data
-    sock.sendall(framed_message)
+        if VERBOSE:
+            print(f"\n[VERBOSE] SENT to Server | {message_length} bytes")
+            print(f"[VERBOSE] RAW: {json_data.decode('utf-8')}")
+            
+        framed_message = struct.pack('>I', message_length) + json_data
+        sock.sendall(framed_message)
+    except Exception as e:
+        print(f"\n[CLIENT] Failed to send PDU: {e}")
 
 def heartbeat_loop(sock):
-    """Sends a PING automatically in the background."""
+    """Sends a PING automatically and enforces a 10-second response timeout."""
     seq_num = 9000 
+    global last_pong_time
+    
     while True:
-        time.sleep(15) 
+        time.sleep(30) # Wait 30 seconds between PINGs
+        
         try:
+            ping_send_time = time.time()
             pdu = {
                 "type": "PING",
                 "seq_num": seq_num,
-                "timestamp": int(time.time() * 1000)
+                "timestamp": int(ping_send_time * 1000)
             }
             send_pdu(sock, pdu)
+            
+            # Wait for the strict 10-second timeout window
+            time.sleep(10)
+            
+            # If a PONG did not update our tracker since we sent the PING
+            if last_pong_time < ping_send_time:
+                print("\n[CLIENT] FATAL ERROR: Server heartbeat timeout. No PONG received within 10 seconds.")
+                sock.close() 
+                sys.exit(1) # Force exit the client script
+                
             seq_num += 1
+            
         except Exception:
             break 
 
 def listen_for_messages(sock):
+    global last_pong_time
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -65,11 +88,16 @@ def listen_for_messages(sock):
                     
                 pdu = json.loads(payload_str)
                 
+                # Update tracker when server responds
+                if pdu.get("type") == "PONG":
+                    last_pong_time = time.time()
+                
                 if not VERBOSE:
                     print(f"[CLIENT] Received {pdu.get('type')} PDU")
                 
-    except (ConnectionResetError, json.JSONDecodeError, struct.error):
+    except (ConnectionResetError, json.JSONDecodeError, struct.error, OSError):
         print("\n[CLIENT] Connection closed or network error occurred.")
+        sys.exit(1)
 
 def main():
     global VERBOSE
@@ -88,7 +116,10 @@ def main():
         print("[CLIENT] Connection refused. Make sure the server is running.")
         return
 
-    # Start the automated heartbeat
+    # Keep track of when we connected to avoid instant timeout triggers
+    global last_pong_time
+    last_pong_time = time.time()
+
     heartbeat_thread = threading.Thread(target=heartbeat_loop, args=(client_sock,), daemon=True)
     heartbeat_thread.start()
 

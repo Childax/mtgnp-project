@@ -18,15 +18,18 @@ def receive_exact(sock, num_bytes):
     return data
 
 def send_pdu(sock, pdu_dict, player_id):
-    json_data = json.dumps(pdu_dict).encode('utf-8')
-    message_length = len(json_data)
-    
-    if VERBOSE:
-        print(f"\n[VERBOSE] SENT to Player {player_id} | {message_length} bytes")
-        print(f"[VERBOSE] RAW: {json_data.decode('utf-8')}")
+    try:
+        json_data = json.dumps(pdu_dict).encode('utf-8')
+        message_length = len(json_data)
         
-    framed_message = struct.pack('>I', message_length) + json_data
-    sock.sendall(framed_message)
+        if VERBOSE:
+            print(f"\n[VERBOSE] SENT to Player {player_id} | {message_length} bytes")
+            print(f"[VERBOSE] RAW: {json_data.decode('utf-8')}")
+            
+        framed_message = struct.pack('>I', message_length) + json_data
+        sock.sendall(framed_message)
+    except Exception as e:
+        print(f"\n[SERVER] Failed to send PDU to Player {player_id}: {e}")
 
 def handle_client(conn, addr, player_id):
     print(f"[SERVER] Player {player_id} connected from {addr}")
@@ -55,7 +58,7 @@ def handle_client(conn, addr, player_id):
             try:
                 pdu = json.loads(payload_str)
                 
-                # Echo PING with PONG for testing
+                # Echo PING with PONG
                 if pdu.get("type") == "PING":
                     response = {
                         "type": "PONG", 
@@ -67,10 +70,12 @@ def handle_client(conn, addr, player_id):
             except json.JSONDecodeError:
                 print(f"[SERVER] Error: Invalid JSON received from Player {player_id}.")
 
-    except ConnectionResetError:
-        pass
+    except (ConnectionResetError, OSError):
+        # This catches unexpected drops
+        print(f"[SERVER] Network drop detected for Player {player_id}.")
     finally:
         print(f"[SERVER] Player {player_id} disconnected.")
+        # TODO: trigger GAME_OVER logic here if IN_GAME (once implemented in lifecycle)
         conn.close()
 
 def main():
