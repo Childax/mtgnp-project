@@ -1,5 +1,10 @@
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+import json
+
+# Load the valid card IDs once when the module is imported
+with open("shared/data/card_catalog.json", "r") as f:
+    VALID_CARD_IDS = set(json.load(f).keys())
 
 # ==========================================
 # HELPER / SUB-MODELS
@@ -46,6 +51,18 @@ class PlayerReadyPDU(BasePDU):
     type: Literal["PLAYER_READY"] = "PLAYER_READY"
     player_id: str
     deck_list: List[str]
+
+    @field_validator('deck_list')
+    @classmethod
+    def validate_deck(cls, deck: List[str]) -> List[str]:
+        if not (1 <= len(deck) <= 50):
+            raise ValueError("ILLEGAL_DECK: Deck must contain between 1 and 50 cards.")
+        
+        for card_id in deck:
+            if card_id not in VALID_CARD_IDS:
+                raise ValueError(f"ILLEGAL_DECK: Card '{card_id}' is not in the legal catalog.")
+        
+        return deck
 
 class MulliganChoicePDU(BasePDU):
     type: Literal["MULLIGAN_CHOICE"] = "MULLIGAN_CHOICE"

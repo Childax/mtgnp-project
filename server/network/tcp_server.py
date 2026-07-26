@@ -7,7 +7,12 @@ import os
 import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 from shared.network_utils import receive_exact, send_pdu
+from pydantic import ValidationError
+from shared.pdu import parse_pdu, BasePDU
+from server.core.lifecycle import LobbyManager
+
 
 HOST = '127.0.0.1'
 PORT = 4444
@@ -15,6 +20,7 @@ VERBOSE = False
 
 # Track player sessions and connection states
 sessions = {}
+lobby = LobbyManager()
 RECONNECT_TIMEOUT = 60.0 # 60 seconds to reconnect
 
 def trigger_forfeit(player_id):
@@ -57,28 +63,73 @@ def handle_client(conn, addr, player_id):
                 print(f"[VERBOSE] RAW: {payload_str}")
             
             try:
-                pdu = json.loads(payload_str)
+                raw_dict = json.loads(payload_str)
                 
-                if "type" not in pdu or "seq_num" not in pdu:
-                    print(f"[SERVER] Rejected invalid PDU from Player {player_id}")
-                    error_msg = {
-                        "type": "ERROR",
-                        "error_code": "UNKNOWN_TYPE",
-                        "message": "PDU must contain 'type' and 'seq_num'."
-                    }
-                    send_pdu(conn, error_msg, VERBOSE, f"to Player {player_id}")
-                    continue
+                # 1. Strict parsing and validation via pdu.py
+                pdu = parse_pdu(raw_dict)
                 
-                if pdu.get("type") == "PING":
+                # 2. Handle System Messages
+                if pdu.type == "PING":
                     response = {
                         "type": "PONG", 
-                        "seq_num": pdu.get("seq_num"), 
-                        "timestamp": pdu.get("timestamp", 0)
+                        "seq_num": pdu.seq_num, 
+                        "timestamp": pdu.timestamp
                     }
                     send_pdu(conn, response, VERBOSE, f"to Player {player_id}")
+                    continue
+
+                # 3. Route Protocol Messages to the appropriate state manager
+                if pdu.type == "PLAYER_READY":
+                    success, status, data = lobby.process_player_ready(player_id, pdu)
                     
-            except json.JSONDecodeError:
-                print(f"[SERVER] Error: Invalid JSON received from Player {player_id}.")
+                    if not success:
+                        # DUPLICATE_ID violation
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": status,
+                            "message": data,
+                            "rejected_action": raw_dict
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                    else:
+                        # Success! Send the GAME_STATE_UPDATE back to the client(s)
+                        update_msg = {
+                            "type": "GAME_STATE_UPDATE",
+                            "seq_num": 2, # Hardcoded for Week 1 milestone testing
+                            "state": data
+                        }
+                        # If status is GAME_SETUP, we broadcast to ALL clients. 
+                        # For now, let's just send it back to the active client to confirm ready state.
+                        send_pdu(conn, update_msg, VERBOSE, f"LOBBY STATE to Player {player_id}")
+                        
+                        if status == "GAME_SETUP":
+                            print("\n[SERVER] AUTOMATA TRANSITION: LOBBY -> GAME_SETUP")
+                            # We will add the logic to broadcast to both clients and start 
+                            # shuffling decks in the next step.
+
+            except ValidationError as e:
+                # Catch invalid schemas, missing fields, or illegal decks
+                print(f"[SERVER] Validation rejected action from Player {player_id}")
+                error_msg = {
+                    "type": "ERROR",
+                    "seq_num": raw_dict.get("seq_num", 0),
+                    "code": "ILLEGAL_DECK" if "ILLEGAL_DECK" in str(e) else "INVALID_JSON",
+                    "message": str(e),
+                    "rejected_action": raw_dict
+                }
+                send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+
+            except ValueError as e:
+                # Catch UNKNOWN_TYPE
+                error_msg = {
+                    "type": "ERROR",
+                    "seq_num": raw_dict.get("seq_num", 0),
+                    "code": "UNKNOWN_TYPE",
+                    "message": str(e),
+                    "rejected_action": raw_dict
+                }
+                send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
 
     except (ConnectionResetError, OSError):
         print(f"\n[SERVER] Network drop detected for Player {player_id}.")

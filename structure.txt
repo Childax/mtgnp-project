@@ -1,0 +1,47 @@
+.
+├── client
+│   ├── __init__.py
+│   ├── main.py
+│   ├── network
+│   │   ├── __init__.py
+│   │   ├── heartbeat.py
+│   │   └── tcp_client.py
+│   └── ui
+│       ├── __init__.py
+│       ├── battlefield.py
+│       └── stack_viewer.py
+├── server
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   └── __init__.cpython-314.pyc
+│   ├── core
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-314.pyc
+│   │   │   └── lifecycle.cpython-314.pyc
+│   │   ├── lifecycle.py
+│   │   └── server_state.py
+│   ├── engine
+│   │   ├── __init__.py
+│   │   ├── combat.py
+│   │   ├── priority.py
+│   │   ├── stack_manager.py
+│   │   └── turn_manager.py
+│   ├── main.py
+│   └── network
+│       ├── __init__.py
+│       ├── router.py
+│       └── tcp_server.py
+├── shared
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-314.pyc
+│   │   ├── network_utils.cpython-314.pyc
+│   │   └── pdu.cpython-314.pyc
+│   ├── data
+│   │   └── card_catalog.json
+│   ├── network_utils.py
+│   └── pdu.py
+└── structure.txt
+
+13 directories, 32 files
