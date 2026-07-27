@@ -10,14 +10,20 @@ import os
 _CATALOG_PATH = os.path.join(os.path.dirname(__file__), "data", "card_catalog.json")
 try:
     with open(_CATALOG_PATH, "r") as f:
-        VALID_CARD_IDS = set(json.load(f).keys())
+        CARD_CATALOG = json.load(f)
 except FileNotFoundError:
     # Catalog not present yet in this environment (e.g. engine-only
     # testing before the catalog file is added to the repo). Falling
-    # back to an empty set means deck validation is skipped rather than
-    # crashing on import -- fine for engine dev, NOT fine for the real
-    # LOBBY flow, where the catalog must exist.
-    VALID_CARD_IDS = set()
+    # back to an empty dict means deck validation / mana lookups are
+    # skipped rather than crashing on import -- fine for engine dev,
+    # NOT fine for the real LOBBY flow, where the catalog must exist.
+    CARD_CATALOG = {}
+
+# Kept for backwards compatibility with code that only needs the ID set
+# (originally this was the only thing extracted from the catalog file --
+# CARD_CATALOG above now also exposes full card data: mana_cost, type,
+# power/toughness, mana_produced, etc.)
+VALID_CARD_IDS = set(CARD_CATALOG.keys())
 
 # ==========================================
 # HELPER / SUB-MODELS
@@ -272,10 +278,9 @@ def parse_pdu(raw_dict: Dict[str, Any]) -> BasePDU:
 # ENGINE COMPATIBILITY LAYER  (added by Ren -- server/engine/* modules)
 # ===========================================================================
 #
-# Everything below this line did NOT exist in Andi's original pdu.py, Im just 
-# adding this here to not change the naming conventions first since i started making
-# the files beforehand, will reconcile before passing
-# 
+# Everything below this line didn't exist in Andi's original shared/pdu.py, but is added 
+# here to make the other engine part works, tintamad lng me to change the file names 
+# added side by side with no behavior change to either.
 # ---------------------------------------------------------------------------
 
 
@@ -341,7 +346,7 @@ class Phase:
     """
     Phase/step constants and ordering (RFC Section 10.2.4 / Figure 4).
 
-    NOTE: this ordering/grouping logic doesn't exist anywhere in
+    NOTE: this ordering/grouping logic doesn't exist anywhere in Andi's
     PhaseTransitionPDU (which just accepts free-form strings) -- it's
     genuinely turn-engine-specific, so it lives here rather than being
     something to reconcile against Andi's code.
@@ -376,6 +381,13 @@ class Phase:
     }
 
     MAIN_PHASES = {PRECOMBAT_MAIN, POSTCOMBAT_MAIN}
+
+
+# ---------------------------------------------------------------------------
+# Builder functions -- construct the real Pydantic model, return a plain
+# dict via .to_dict(). This means every PDU your engine sends is still
+# validated by the models made above
+# ---------------------------------------------------------------------------
 
 def build_phase_transition(seq_num: int, from_phase: str, to_phase: str,
                             active_player: str, turn: int) -> dict:
