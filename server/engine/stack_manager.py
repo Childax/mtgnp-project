@@ -250,7 +250,7 @@ class StackManager:
            here, to be filled in by whoever owns that ticket.
         """
         card_info = self.card_catalog.get(item.source_id, {})
-        card_type = card_info.get("type", "")
+        card_type = str(card_info.get("type", "")).upper()
         state_changes: list[dict] = []
 
         if item.item_type == ItemType.SPELL and card_type in ("CREATURE", "ARTIFACT", "ENCHANTMENT"):

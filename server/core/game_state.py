@@ -20,7 +20,7 @@ Sections:
   4. SET-02: London Mulligan
   5. SET-03: personalized state dicts (in-game + lobby variants)
 """
- 
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -409,9 +409,17 @@ def build_permanent_from_catalog(card_id: str, catalog: Optional[dict] = None,
     """
     catalog = catalog or {}
     info = catalog.get(card_id, {})
-    card_type = info.get("type", "")
+    card_type = str(info.get("type", "")).upper()
     is_creature = card_type == "CREATURE"
  
+    # NOTE: previously this only ran mana inference when card_type was
+    # exactly "LAND" or empty, which silently produced {} (no mana) for
+    # any land whose catalog "type" value used different casing (e.g.
+    # "Land") or wasn't present in the catalog at all. infer_mana_produced()
+    # is already safe to call unconditionally -- it checks the catalog's
+    # explicit mana_produced field first, then falls back to basic-land
+    # name matching, and returns {} for anything that isn't a mana
+    # source. So just always call it instead of gating on card_type.
     return Permanent(
         id=card_id,
         tapped=False,
@@ -422,6 +430,6 @@ def build_permanent_from_catalog(card_id: str, catalog: Optional[dict] = None,
         has_first_strike=info.get("has_first_strike", False),
         has_double_strike=info.get("has_double_strike", False),
         has_haste=info.get("has_haste", False),
-        mana_produced=infer_mana_produced(card_id, catalog) if card_type in ("LAND", "") else {},
+        mana_produced=infer_mana_produced(card_id, catalog),
     )
  
