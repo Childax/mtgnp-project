@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 
 from shared.network_utils import receive_exact, send_pdu
 from pydantic import ValidationError
-from shared.pdu import parse_pdu, BasePDU
+from shared.pdu import parse_pdu, build_phase_transition
 from server.core.lifecycle import LobbyManager
 from server.core.game_state import GameState
 
@@ -153,6 +153,75 @@ def handle_client(conn, addr, player_id):
                             )
                             # We will add the logic to broadcast to both clients and start 
                             # shuffling decks in the next step.
+
+                elif pdu.type == "MULLIGAN_CHOICE":
+                    if current_game_state is None:
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": "ILLEGAL_ACTION",
+                            "message": "No game is currently in the MULLIGAN phase."
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                        continue
+
+                    game_player_id = lobby.ready_players[player_id]["player_id"]
+
+                    if not pdu.keep:
+                        print(
+                            f"[SERVER] {game_player_id} requested a mulligan. "
+                            "Redraw handling will be added next."
+                        )
+                        continue
+
+                    error = current_game_state.mulligan_keep(
+                        game_player_id,
+                        pdu.cards_to_bottom
+                    )
+
+                    if error:
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": "ILLEGAL_ACTION",
+                            "message": error
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                        continue
+
+                    print(f"[SERVER] {game_player_id} kept their opening hand.")
+
+                    both_players_kept = all(
+                        player.has_kept_hand
+                        for player in current_game_state.players.values()
+                    )
+
+                    if both_players_kept:
+                        current_game_state.turn = 1
+                        current_game_state.phase = "UNTAP"
+                        current_game_state.priority_holder = None
+
+                        transition_pdu = build_phase_transition(
+                            seq_num=current_game_state.next_seq(),
+                            from_phase="MULLIGAN",
+                            to_phase="UNTAP",
+                            active_player=current_game_state.active_player,
+                            turn=current_game_state.turn
+                        )
+
+                        print(
+                            "[SERVER] AUTOMATA TRANSITION: "
+                            "MULLIGAN -> IN_GAME / UNTAP"
+                        )
+
+                        for session_player_id, session in sessions.items():
+                            if session["connected"]:
+                                send_pdu(
+                                    session["conn"],
+                                    transition_pdu,
+                                    VERBOSE,
+                                    f"PHASE_TRANSITION to Player {session_player_id}"
+                                )
 
             except ValidationError as e:
                 # Catch invalid schemas, missing fields, or illegal decks
