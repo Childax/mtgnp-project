@@ -8,11 +8,16 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from shared.network_utils import receive_exact, send_pdu
+from client.ui.battlefield import BattlefieldUI
 
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
 last_pong_time = time.time()
+latest_server_seq = 0
+latest_mulligan_hand = []
+latest_mulligan_count = 0
+mulligan_state_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -41,8 +46,9 @@ def heartbeat_loop(sock):
         except Exception:
             break 
 
-def listen_for_messages(sock):
-    global last_pong_time
+def listen_for_messages(sock, ui=None):
+    global last_pong_time, latest_server_seq
+    global latest_mulligan_hand, latest_mulligan_count
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -68,9 +74,6 @@ def listen_for_messages(sock):
                 if pdu_type == "PONG":
                     last_pong_time = time.time()
 
-                    if not VERBOSE:
-                        print("[CLIENT] Received PONG PDU")
-
                 elif pdu_type == "GAME_STATE_UPDATE":
                     state = pdu.get("state", {})
                     phase = state.get("phase")
@@ -84,7 +87,21 @@ def listen_for_messages(sock):
                         if waiting_for:
                             print(f"[CLIENT] Waiting for: {', '.join(waiting_for)}")
                     else:
-                        print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
+                        if ui:
+                            ui.render(pdu)
+                        else:
+                            print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
+
+                        if phase == "MULLIGAN":
+                            latest_server_seq = pdu.get("seq_num", 0)
+                            latest_mulligan_count = state.get("mulligan_count", 0)
+
+                            if ui:
+                                latest_mulligan_hand = list(
+                                    state.get("hand", {}).get(ui.player_id, [])
+                                )
+
+                            mulligan_state_received.set()
 
                 elif pdu_type == "ERROR":
                     print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
@@ -131,6 +148,37 @@ def main():
         print("\n[CLIENT] Closing connection.")
         client_sock.close()
 
+def prompt_cards_to_bottom(hand, count):
+    """Ask the player which cards to place at the bottom after mulligans."""
+    if count == 0:
+        return []
+
+    while True:
+        raw_indexes = input(
+            f"Choose {count} card index(es) to put on the bottom "
+            "(separated by spaces): "
+        ).strip()
+
+        try:
+            indexes = [int(value) for value in raw_indexes.split()]
+        except ValueError:
+            print("Please enter card indexes using numbers only.")
+            continue
+
+        if len(indexes) != count:
+            print(f"You must choose exactly {count} card(s).")
+            continue
+
+        if len(set(indexes)) != len(indexes):
+            print("Do not choose the same index more than once.")
+            continue
+
+        if any(index < 0 or index >= len(hand) for index in indexes):
+            print("One or more card indexes are invalid.")
+            continue
+
+        return [hand[index] for index in indexes]
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -138,6 +186,8 @@ def start_client(player_id, deck_list, verbose=False):
     VERBOSE = verbose
 
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    ui = BattlefieldUI(player_id)
 
     try:
         client_sock.connect((HOST, PORT))
@@ -157,7 +207,7 @@ def start_client(player_id, deck_list, verbose=False):
 
     listener_thread = threading.Thread(
         target=listen_for_messages,
-        args=(client_sock,),
+        args=(client_sock, ui),
         daemon=True
     )
     listener_thread.start()
@@ -177,6 +227,61 @@ def start_client(player_id, deck_list, verbose=False):
     )
 
     print(f"[CLIENT] Sent PLAYER_READY for {player_id}.")
+
+    print("[CLIENT] Waiting for opening hand...")
+
+    while True:
+        mulligan_state_received.wait()
+        mulligan_state_received.clear()
+
+        while True:
+            choice = input("\nKeep or mulligan? [K/M]: ").strip().upper()
+
+            if choice in {"K", "M"}:
+                break
+
+            print("Please enter K to keep or M to mulligan.")
+
+        if choice == "M":
+            mulligan_pdu = {
+                "type": "MULLIGAN_CHOICE",
+                "seq_num": latest_server_seq,
+                "keep": False,
+                "cards_to_bottom": []
+            }
+
+            send_pdu(
+                client_sock,
+                mulligan_pdu,
+                VERBOSE,
+                "MULLIGAN_CHOICE to Server"
+            )
+
+            print("[CLIENT] Sent MULLIGAN_CHOICE: MULLIGAN.")
+            print("[CLIENT] Waiting for a new opening hand...")
+            continue
+
+        cards_to_bottom = prompt_cards_to_bottom(
+            latest_mulligan_hand,
+            latest_mulligan_count
+        )
+
+        keep_pdu = {
+            "type": "MULLIGAN_CHOICE",
+            "seq_num": latest_server_seq,
+            "keep": True,
+            "cards_to_bottom": cards_to_bottom
+        }
+
+        send_pdu(
+            client_sock,
+            keep_pdu,
+            VERBOSE,
+            "MULLIGAN_CHOICE to Server"
+        )
+
+        print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
+        break
 
     try:
         while True:

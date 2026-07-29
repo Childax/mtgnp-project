@@ -10,8 +10,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 
 from shared.network_utils import receive_exact, send_pdu
 from pydantic import ValidationError
-from shared.pdu import parse_pdu, BasePDU
+from shared.pdu import parse_pdu, build_phase_transition
 from server.core.lifecycle import LobbyManager
+from server.core.game_state import GameState
 
 
 HOST = '127.0.0.1'
@@ -21,6 +22,7 @@ VERBOSE = False
 # Track player sessions and connection states
 sessions = {}
 lobby = LobbyManager()
+current_game_state = None
 RECONNECT_TIMEOUT = 60.0 # 60 seconds to reconnect
 
 def trigger_forfeit(player_id):
@@ -101,12 +103,172 @@ def handle_client(conn, addr, player_id):
                         }
                         # If status is GAME_SETUP, we broadcast to ALL clients. 
                         # For now, let's just send it back to the active client to confirm ready state.
-                        send_pdu(conn, update_msg, VERBOSE, f"LOBBY STATE to Player {player_id}")
-                        
                         if status == "GAME_SETUP":
+                            global current_game_state
+
                             print("\n[SERVER] AUTOMATA TRANSITION: LOBBY -> GAME_SETUP")
+
+                            player_decks = {
+                                ready_data["player_id"]: ready_data["deck_list"]
+                                for ready_data in lobby.ready_players.values()
+                            }
+
+                            current_game_state = GameState.initialize_from_decks(player_decks)
+
+                            print(
+                                f"[SERVER] Game initialized. "
+                                f"First player: {current_game_state.first_player_id}"
+                            )
+
+                            for session_player_id, session in sessions.items():
+                                if not session["connected"]:
+                                    continue
+
+                                viewer_id = lobby.ready_players[session_player_id]["player_id"]
+
+                                personalized_state = current_game_state.to_personalized_dict(
+                                    viewer_id
+                                )
+
+                                personalized_update = {
+                                    "type": "GAME_STATE_UPDATE",
+                                    "seq_num": current_game_state.next_seq(),
+                                    "state": personalized_state
+                                }
+
+                                send_pdu(
+                                    session["conn"],
+                                    personalized_update,
+                                    VERBOSE,
+                                    f"INITIAL STATE to Player {session_player_id}"
+                                )
+                        else:
+                            # While still waiting in the lobby, reply only to the player
+                            # who most recently sent PLAYER_READY.
+                            send_pdu(
+                                conn,
+                                update_msg,
+                                VERBOSE,
+                                f"LOBBY STATE to Player {player_id}"
+                            )
                             # We will add the logic to broadcast to both clients and start 
                             # shuffling decks in the next step.
+
+                elif pdu.type == "MULLIGAN_CHOICE":
+                    if current_game_state is None:
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": "ILLEGAL_ACTION",
+                            "message": "No game is currently in the MULLIGAN phase."
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                        continue
+
+                    game_player_id = lobby.ready_players[player_id]["player_id"]
+
+                    if not pdu.keep:
+                        current_game_state.mulligan_redraw(game_player_id)
+
+                        redraw_state = current_game_state.to_personalized_dict(
+                            game_player_id
+                        )
+
+                        redraw_update = {
+                            "type": "GAME_STATE_UPDATE",
+                            "seq_num": current_game_state.next_seq(),
+                            "state": redraw_state
+                        }
+
+                        send_pdu(
+                            conn,
+                            redraw_update,
+                            VERBOSE,
+                            f"MULLIGAN REDRAW to Player {player_id}"
+                        )
+
+                        mulligan_count = (
+                            current_game_state.players[game_player_id].mulligan_count
+                        )
+
+                        print(
+                            f"[SERVER] {game_player_id} redrew their opening hand. "
+                            f"Mulligan count: {mulligan_count}"
+                        )
+
+                        continue
+
+                    error = current_game_state.mulligan_keep(
+                        game_player_id,
+                        pdu.cards_to_bottom
+                    )
+
+                    if error:
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": "ILLEGAL_ACTION",
+                            "message": error
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                        continue
+
+                    print(f"[SERVER] {game_player_id} kept their opening hand.")
+
+                    both_players_kept = all(
+                        player.has_kept_hand
+                        for player in current_game_state.players.values()
+                    )
+
+                    if both_players_kept:
+                        current_game_state.turn = 1
+                        current_game_state.phase = "UNTAP"
+                        current_game_state.priority_holder = None
+
+                        transition_pdu = build_phase_transition(
+                            seq_num=current_game_state.next_seq(),
+                            from_phase="MULLIGAN",
+                            to_phase="UNTAP",
+                            active_player=current_game_state.active_player,
+                            turn=current_game_state.turn
+                        )
+
+                        print(
+                            "[SERVER] AUTOMATA TRANSITION: "
+                            "MULLIGAN -> IN_GAME / UNTAP"
+                        )
+
+                        for session_player_id, session in sessions.items():
+                            if not session["connected"]:
+                                continue
+
+                            # Inform the client that the phase changed.
+                            send_pdu(
+                                session["conn"],
+                                transition_pdu,
+                                VERBOSE,
+                                f"PHASE_TRANSITION to Player {session_player_id}"
+                            )
+
+                            # Send the updated personalized state so the UI redraws.
+                            viewer_id = lobby.ready_players[session_player_id]["player_id"]
+
+                            personalized_state = current_game_state.to_personalized_dict(
+                                viewer_id
+                            )
+
+                            state_update = {
+                                "type": "GAME_STATE_UPDATE",
+                                "seq_num": current_game_state.next_seq(),
+                                "state": personalized_state
+                            }
+
+                            send_pdu(
+                                session["conn"],
+                                state_update,
+                                VERBOSE,
+                                f"UPDATED STATE to Player {session_player_id}"
+                            )
 
             except ValidationError as e:
                 # Catch invalid schemas, missing fields, or illegal decks
