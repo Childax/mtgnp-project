@@ -74,9 +74,6 @@ def listen_for_messages(sock, ui=None):
                 if pdu_type == "PONG":
                     last_pong_time = time.time()
 
-                    if not VERBOSE:
-                        print("[CLIENT] Received PONG PDU")
-
                 elif pdu_type == "GAME_STATE_UPDATE":
                     state = pdu.get("state", {})
                     phase = state.get("phase")
