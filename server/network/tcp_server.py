@@ -215,13 +215,36 @@ def handle_client(conn, addr, player_id):
                         )
 
                         for session_player_id, session in sessions.items():
-                            if session["connected"]:
-                                send_pdu(
-                                    session["conn"],
-                                    transition_pdu,
-                                    VERBOSE,
-                                    f"PHASE_TRANSITION to Player {session_player_id}"
-                                )
+                            if not session["connected"]:
+                                continue
+
+                            # Inform the client that the phase changed.
+                            send_pdu(
+                                session["conn"],
+                                transition_pdu,
+                                VERBOSE,
+                                f"PHASE_TRANSITION to Player {session_player_id}"
+                            )
+
+                            # Send the updated personalized state so the UI redraws.
+                            viewer_id = lobby.ready_players[session_player_id]["player_id"]
+
+                            personalized_state = current_game_state.to_personalized_dict(
+                                viewer_id
+                            )
+
+                            state_update = {
+                                "type": "GAME_STATE_UPDATE",
+                                "seq_num": current_game_state.next_seq(),
+                                "state": personalized_state
+                            }
+
+                            send_pdu(
+                                session["conn"],
+                                state_update,
+                                VERBOSE,
+                                f"UPDATED STATE to Player {session_player_id}"
+                            )
 
             except ValidationError as e:
                 # Catch invalid schemas, missing fields, or illegal decks
