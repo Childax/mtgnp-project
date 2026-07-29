@@ -168,10 +168,34 @@ def handle_client(conn, addr, player_id):
                     game_player_id = lobby.ready_players[player_id]["player_id"]
 
                     if not pdu.keep:
-                        print(
-                            f"[SERVER] {game_player_id} requested a mulligan. "
-                            "Redraw handling will be added next."
+                        current_game_state.mulligan_redraw(game_player_id)
+
+                        redraw_state = current_game_state.to_personalized_dict(
+                            game_player_id
                         )
+
+                        redraw_update = {
+                            "type": "GAME_STATE_UPDATE",
+                            "seq_num": current_game_state.next_seq(),
+                            "state": redraw_state
+                        }
+
+                        send_pdu(
+                            conn,
+                            redraw_update,
+                            VERBOSE,
+                            f"MULLIGAN REDRAW to Player {player_id}"
+                        )
+
+                        mulligan_count = (
+                            current_game_state.players[game_player_id].mulligan_count
+                        )
+
+                        print(
+                            f"[SERVER] {game_player_id} redrew their opening hand. "
+                            f"Mulligan count: {mulligan_count}"
+                        )
+
                         continue
 
                     error = current_game_state.mulligan_keep(
