@@ -12,6 +12,7 @@ from shared.network_utils import receive_exact, send_pdu
 from pydantic import ValidationError
 from shared.pdu import parse_pdu, BasePDU
 from server.core.lifecycle import LobbyManager
+from server.core.game_state import GameState
 
 
 HOST = '127.0.0.1'
@@ -21,6 +22,7 @@ VERBOSE = False
 # Track player sessions and connection states
 sessions = {}
 lobby = LobbyManager()
+current_game_state = None
 RECONNECT_TIMEOUT = 60.0 # 60 seconds to reconnect
 
 def trigger_forfeit(player_id):
@@ -102,17 +104,44 @@ def handle_client(conn, addr, player_id):
                         # If status is GAME_SETUP, we broadcast to ALL clients. 
                         # For now, let's just send it back to the active client to confirm ready state.
                         if status == "GAME_SETUP":
+                            global current_game_state
+
                             print("\n[SERVER] AUTOMATA TRANSITION: LOBBY -> GAME_SETUP")
 
-                            # Both players must be informed that game setup has started.
+                            player_decks = {
+                                ready_data["player_id"]: ready_data["deck_list"]
+                                for ready_data in lobby.ready_players.values()
+                            }
+
+                            current_game_state = GameState.initialize_from_decks(player_decks)
+
+                            print(
+                                f"[SERVER] Game initialized. "
+                                f"First player: {current_game_state.first_player_id}"
+                            )
+
                             for session_player_id, session in sessions.items():
-                                if session["connected"]:
-                                    send_pdu(
-                                        session["conn"],
-                                        update_msg,
-                                        VERBOSE,
-                                        f"GAME_SETUP to Player {session_player_id}"
-                                    )
+                                if not session["connected"]:
+                                    continue
+
+                                viewer_id = lobby.ready_players[session_player_id]["player_id"]
+
+                                personalized_state = current_game_state.to_personalized_dict(
+                                    viewer_id
+                                )
+
+                                personalized_update = {
+                                    "type": "GAME_STATE_UPDATE",
+                                    "seq_num": current_game_state.next_seq(),
+                                    "state": personalized_state
+                                }
+
+                                send_pdu(
+                                    session["conn"],
+                                    personalized_update,
+                                    VERBOSE,
+                                    f"INITIAL STATE to Player {session_player_id}"
+                                )
                         else:
                             # While still waiting in the lobby, reply only to the player
                             # who most recently sent PLAYER_READY.
