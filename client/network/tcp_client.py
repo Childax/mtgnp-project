@@ -194,23 +194,32 @@ def start_client(player_id, deck_list, verbose=False):
 
     mulligan_state_received.wait()
 
-    input("\nPress Enter to KEEP this opening hand.")
+    while True:
+        choice = input("\nKeep or mulligan? [K/M]: ").strip().upper()
 
-    keep_pdu = {
+        if choice in {"K", "M"}:
+            break
+
+        print("Please enter K to keep or M to mulligan.")
+
+    mulligan_pdu = {
         "type": "MULLIGAN_CHOICE",
         "seq_num": latest_server_seq,
-        "keep": True,
+        "keep": choice == "K",
         "cards_to_bottom": []
     }
 
     send_pdu(
         client_sock,
-        keep_pdu,
+        mulligan_pdu,
         VERBOSE,
         "MULLIGAN_CHOICE to Server"
     )
 
-    print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
+    if choice == "K":
+        print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
+    else:
+        print("[CLIENT] Sent MULLIGAN_CHOICE: MULLIGAN.")
 
     try:
         while True:
