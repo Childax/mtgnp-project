@@ -14,6 +14,8 @@ HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
 last_pong_time = time.time()
+latest_server_seq = 0
+mulligan_state_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -43,7 +45,7 @@ def heartbeat_loop(sock):
             break 
 
 def listen_for_messages(sock, ui=None):
-    global last_pong_time
+    global last_pong_time, latest_server_seq
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -89,6 +91,10 @@ def listen_for_messages(sock, ui=None):
                             ui.render(pdu)
                         else:
                             print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
+
+                        if phase == "MULLIGAN":
+                            latest_server_seq = pdu.get("seq_num", 0)
+                            mulligan_state_received.set()
 
                 elif pdu_type == "ERROR":
                     print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
@@ -183,6 +189,28 @@ def start_client(player_id, deck_list, verbose=False):
     )
 
     print(f"[CLIENT] Sent PLAYER_READY for {player_id}.")
+
+    print("[CLIENT] Waiting for opening hand...")
+
+    mulligan_state_received.wait()
+
+    input("\nPress Enter to KEEP this opening hand.")
+
+    keep_pdu = {
+        "type": "MULLIGAN_CHOICE",
+        "seq_num": latest_server_seq,
+        "keep": True,
+        "cards_to_bottom": []
+    }
+
+    send_pdu(
+        client_sock,
+        keep_pdu,
+        VERBOSE,
+        "MULLIGAN_CHOICE to Server"
+    )
+
+    print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
 
     try:
         while True:
