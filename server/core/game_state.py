@@ -345,6 +345,7 @@ class GameState:
                 pid: len(p.library) for pid, p in self.players.items()
             },
             "land_played_this_turn": viewer.land_played_this_turn,
+            "mulligan_count": viewer.mulligan_count,
         }
  
  

@@ -15,6 +15,8 @@ PORT = 4444
 VERBOSE = False
 last_pong_time = time.time()
 latest_server_seq = 0
+latest_mulligan_hand = []
+latest_mulligan_count = 0
 mulligan_state_received = threading.Event()
 
 def heartbeat_loop(sock):
@@ -46,6 +48,7 @@ def heartbeat_loop(sock):
 
 def listen_for_messages(sock, ui=None):
     global last_pong_time, latest_server_seq
+    global latest_mulligan_hand, latest_mulligan_count
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -94,6 +97,13 @@ def listen_for_messages(sock, ui=None):
 
                         if phase == "MULLIGAN":
                             latest_server_seq = pdu.get("seq_num", 0)
+                            latest_mulligan_count = state.get("mulligan_count", 0)
+
+                            if ui:
+                                latest_mulligan_hand = list(
+                                    state.get("hand", {}).get(ui.player_id, [])
+                                )
+
                             mulligan_state_received.set()
 
                 elif pdu_type == "ERROR":
@@ -140,6 +150,37 @@ def main():
     finally:
         print("\n[CLIENT] Closing connection.")
         client_sock.close()
+
+def prompt_cards_to_bottom(hand, count):
+    """Ask the player which cards to place at the bottom after mulligans."""
+    if count == 0:
+        return []
+
+    while True:
+        raw_indexes = input(
+            f"Choose {count} card index(es) to put on the bottom "
+            "(separated by spaces): "
+        ).strip()
+
+        try:
+            indexes = [int(value) for value in raw_indexes.split()]
+        except ValueError:
+            print("Please enter card indexes using numbers only.")
+            continue
+
+        if len(indexes) != count:
+            print(f"You must choose exactly {count} card(s).")
+            continue
+
+        if len(set(indexes)) != len(indexes):
+            print("Do not choose the same index more than once.")
+            continue
+
+        if any(index < 0 or index >= len(hand) for index in indexes):
+            print("One or more card indexes are invalid.")
+            continue
+
+        return [hand[index] for index in indexes]
 
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
@@ -192,34 +233,58 @@ def start_client(player_id, deck_list, verbose=False):
 
     print("[CLIENT] Waiting for opening hand...")
 
-    mulligan_state_received.wait()
-
     while True:
-        choice = input("\nKeep or mulligan? [K/M]: ").strip().upper()
+        mulligan_state_received.wait()
+        mulligan_state_received.clear()
 
-        if choice in {"K", "M"}:
-            break
+        while True:
+            choice = input("\nKeep or mulligan? [K/M]: ").strip().upper()
 
-        print("Please enter K to keep or M to mulligan.")
+            if choice in {"K", "M"}:
+                break
 
-    mulligan_pdu = {
-        "type": "MULLIGAN_CHOICE",
-        "seq_num": latest_server_seq,
-        "keep": choice == "K",
-        "cards_to_bottom": []
-    }
+            print("Please enter K to keep or M to mulligan.")
 
-    send_pdu(
-        client_sock,
-        mulligan_pdu,
-        VERBOSE,
-        "MULLIGAN_CHOICE to Server"
-    )
+        if choice == "M":
+            mulligan_pdu = {
+                "type": "MULLIGAN_CHOICE",
+                "seq_num": latest_server_seq,
+                "keep": False,
+                "cards_to_bottom": []
+            }
 
-    if choice == "K":
+            send_pdu(
+                client_sock,
+                mulligan_pdu,
+                VERBOSE,
+                "MULLIGAN_CHOICE to Server"
+            )
+
+            print("[CLIENT] Sent MULLIGAN_CHOICE: MULLIGAN.")
+            print("[CLIENT] Waiting for a new opening hand...")
+            continue
+
+        cards_to_bottom = prompt_cards_to_bottom(
+            latest_mulligan_hand,
+            latest_mulligan_count
+        )
+
+        keep_pdu = {
+            "type": "MULLIGAN_CHOICE",
+            "seq_num": latest_server_seq,
+            "keep": True,
+            "cards_to_bottom": cards_to_bottom
+        }
+
+        send_pdu(
+            client_sock,
+            keep_pdu,
+            VERBOSE,
+            "MULLIGAN_CHOICE to Server"
+        )
+
         print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
-    else:
-        print("[CLIENT] Sent MULLIGAN_CHOICE: MULLIGAN.")
+        break
 
     try:
         while True:
