@@ -8,6 +8,7 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from shared.network_utils import receive_exact, send_pdu
+from client.ui.battlefield import BattlefieldUI
 
 HOST = '127.0.0.1'
 PORT = 4444
@@ -41,7 +42,7 @@ def heartbeat_loop(sock):
         except Exception:
             break 
 
-def listen_for_messages(sock):
+def listen_for_messages(sock, ui=None):
     global last_pong_time
     try:
         while True:
@@ -84,7 +85,10 @@ def listen_for_messages(sock):
                         if waiting_for:
                             print(f"[CLIENT] Waiting for: {', '.join(waiting_for)}")
                     else:
-                        print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
+                        if ui:
+                            ui.render(pdu)
+                        else:
+                            print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
 
                 elif pdu_type == "ERROR":
                     print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
@@ -139,6 +143,8 @@ def start_client(player_id, deck_list, verbose=False):
 
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+    ui = BattlefieldUI(player_id)
+
     try:
         client_sock.connect((HOST, PORT))
         print(f"[CLIENT] Connected to Game Server at {HOST}:{PORT}")
@@ -157,7 +163,7 @@ def start_client(player_id, deck_list, verbose=False):
 
     listener_thread = threading.Thread(
         target=listen_for_messages,
-        args=(client_sock,),
+        args=(client_sock, ui),
         daemon=True
     )
     listener_thread.start()
