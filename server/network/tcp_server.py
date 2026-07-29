@@ -101,10 +101,27 @@ def handle_client(conn, addr, player_id):
                         }
                         # If status is GAME_SETUP, we broadcast to ALL clients. 
                         # For now, let's just send it back to the active client to confirm ready state.
-                        send_pdu(conn, update_msg, VERBOSE, f"LOBBY STATE to Player {player_id}")
-                        
                         if status == "GAME_SETUP":
                             print("\n[SERVER] AUTOMATA TRANSITION: LOBBY -> GAME_SETUP")
+
+                            # Both players must be informed that game setup has started.
+                            for session_player_id, session in sessions.items():
+                                if session["connected"]:
+                                    send_pdu(
+                                        session["conn"],
+                                        update_msg,
+                                        VERBOSE,
+                                        f"GAME_SETUP to Player {session_player_id}"
+                                    )
+                        else:
+                            # While still waiting in the lobby, reply only to the player
+                            # who most recently sent PLAYER_READY.
+                            send_pdu(
+                                conn,
+                                update_msg,
+                                VERBOSE,
+                                f"LOBBY STATE to Player {player_id}"
+                            )
                             # We will add the logic to broadcast to both clients and start 
                             # shuffling decks in the next step.
 
