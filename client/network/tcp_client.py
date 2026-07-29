@@ -63,11 +63,34 @@ def listen_for_messages(sock):
                     
                 pdu = json.loads(payload_str)
                 
-                if pdu.get("type") == "PONG":
+                pdu_type = pdu.get("type")
+
+                if pdu_type == "PONG":
                     last_pong_time = time.time()
-                
-                if not VERBOSE:
-                    print(f"[CLIENT] Received {pdu.get('type')} PDU")
+
+                    if not VERBOSE:
+                        print("[CLIENT] Received PONG PDU")
+
+                elif pdu_type == "GAME_STATE_UPDATE":
+                    state = pdu.get("state", {})
+                    phase = state.get("phase")
+
+                    if phase == "LOBBY":
+                        players_ready = state.get("players_ready", 0)
+                        waiting_for = state.get("waiting_for", [])
+
+                        print(f"\n[CLIENT] Lobby: {players_ready}/2 players ready.")
+
+                        if waiting_for:
+                            print(f"[CLIENT] Waiting for: {', '.join(waiting_for)}")
+                    else:
+                        print(f"\n[CLIENT] Game state updated. Current phase: {phase}")
+
+                elif pdu_type == "ERROR":
+                    print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
+
+                else:
+                    print(f"\n[CLIENT] Received {pdu_type} PDU")
                 
     except (ConnectionResetError, json.JSONDecodeError, struct.error, OSError):
         print("\n[CLIENT] Connection closed or network error occurred.")
@@ -98,6 +121,62 @@ def main():
 
     listener_thread = threading.Thread(target=listen_for_messages, args=(client_sock,), daemon=True)
     listener_thread.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\n[CLIENT] Closing connection.")
+        client_sock.close()
+
+def start_client(player_id, deck_list, verbose=False):
+    """Connects the configured player and sends PLAYER_READY."""
+    global VERBOSE, last_pong_time
+
+    VERBOSE = verbose
+
+    client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        client_sock.connect((HOST, PORT))
+        print(f"[CLIENT] Connected to Game Server at {HOST}:{PORT}")
+    except ConnectionRefusedError:
+        print("[CLIENT] Connection refused. Make sure the server is running.")
+        return
+
+    last_pong_time = time.time()
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        args=(client_sock,),
+        daemon=True
+    )
+    heartbeat_thread.start()
+
+    listener_thread = threading.Thread(
+        target=listen_for_messages,
+        args=(client_sock,),
+        daemon=True
+    )
+    listener_thread.start()
+
+    ready_pdu = {
+        "type": "PLAYER_READY",
+        "seq_num": 1,
+        "player_id": player_id,
+        "deck_list": deck_list
+    }
+
+    send_pdu(
+        client_sock,
+        ready_pdu,
+        VERBOSE,
+        "PLAYER_READY to Server"
+    )
+
+    print(f"[CLIENT] Sent PLAYER_READY for {player_id}.")
 
     try:
         while True:
