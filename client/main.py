@@ -59,9 +59,10 @@ def main():
     print(f"Deck size: {len(deck_list)} cards")
     print(f"Deck: {deck_list}")
     
+    input("\nPress Enter when you are ready...")
     print("\nConnecting to the game server...")
     start_client(player_id, deck_list)
-
+    
 
 if __name__ == "__main__":
     main()
