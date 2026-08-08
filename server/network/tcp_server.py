@@ -10,31 +10,64 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 
 from shared.network_utils import receive_exact, send_pdu
 from pydantic import ValidationError
-from shared.pdu import parse_pdu, build_phase_transition
+from shared.pdu import parse_pdu, build_phase_transition, build_game_over
 from server.core.lifecycle import LobbyManager
 from server.core.game_state import GameState
+from server.network.router import route_gameplay_pdu
 
 
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
 
-# Track player sessions and connection states
 sessions = {}
 lobby = LobbyManager()
+RECONNECT_TIMEOUT = 60.0
+
+# Member 3 initialize this
 current_game_state = None
-RECONNECT_TIMEOUT = 60.0 # 60 seconds to reconnect
+turn_manager = None
+stack_manager = None
+priority_manager = None
 
 def trigger_forfeit(player_id):
     """Called when a player fails to reconnect within the time limit."""
+    global current_game_state, turn_manager, stack_manager, priority_manager
     if sessions.get(player_id) and not sessions[player_id]["connected"]:
         print(f"\n[SERVER] Player {player_id} failed to reconnect in time. FORFEIT.")
-        # TODO: Broadcast GAME_OVER (DISCONNECT) to the remaining player
+        
+        remaining_player = 1 if player_id == 2 else 2
+        
+        if sessions.get(remaining_player) and sessions[remaining_player]["connected"]:
+            seq = current_game_state.next_seq() if current_game_state else 999
+            
+            loser_logical_id = lobby.ready_players.get(player_id, {}).get("player_id", str(player_id))
+            winner_logical_id = lobby.ready_players.get(remaining_player, {}).get("player_id", str(remaining_player))
+            
+            game_over_pdu = build_game_over(
+                seq_num=seq, 
+                winner_id=winner_logical_id, 
+                loser_id=loser_logical_id, 
+                reason="DISCONNECT"
+            )
+            send_pdu(
+                sessions[remaining_player]["conn"], 
+                game_over_pdu, 
+                VERBOSE, 
+                f"GAME_OVER to Player {remaining_player}"
+            )
+            
+        current_game_state = None
+        turn_manager = None
+        stack_manager = None
+        priority_manager = None
+        lobby.ready_players.clear()
+        print("[SERVER] Game over. Returned to LOBBY state.")
 
 def handle_client(conn, addr, player_id):
+    global current_game_state, turn_manager, stack_manager, priority_manager
     print(f"[SERVER] Player {player_id} connected from {addr}")
     
-    # Cancel any existing disconnect timer since they just reconnected
     if player_id in sessions and sessions[player_id].get("timer"):
         sessions[player_id]["timer"].cancel()
         print(f"[SERVER] Reconnect timer for Player {player_id} cancelled.")
@@ -66,11 +99,8 @@ def handle_client(conn, addr, player_id):
             
             try:
                 raw_dict = json.loads(payload_str)
-                
-                # 1. Strict parsing and validation via pdu.py
                 pdu = parse_pdu(raw_dict)
                 
-                # 2. Handle System Messages
                 if pdu.type == "PING":
                     response = {
                         "type": "PONG", 
@@ -80,12 +110,10 @@ def handle_client(conn, addr, player_id):
                     send_pdu(conn, response, VERBOSE, f"to Player {player_id}")
                     continue
 
-                # 3. Route Protocol Messages to the appropriate state manager
                 if pdu.type == "PLAYER_READY":
                     success, status, data = lobby.process_player_ready(player_id, pdu)
                     
                     if not success:
-                        # DUPLICATE_ID violation
                         error_msg = {
                             "type": "ERROR",
                             "seq_num": pdu.seq_num,
@@ -95,17 +123,12 @@ def handle_client(conn, addr, player_id):
                         }
                         send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
                     else:
-                        # Success! Send the GAME_STATE_UPDATE back to the client(s)
                         update_msg = {
                             "type": "GAME_STATE_UPDATE",
-                            "seq_num": 2, # Hardcoded for Week 1 milestone testing
+                            "seq_num": 2, 
                             "state": data
                         }
-                        # If status is GAME_SETUP, we broadcast to ALL clients. 
-                        # For now, let's just send it back to the active client to confirm ready state.
                         if status == "GAME_SETUP":
-                            global current_game_state
-
                             print("\n[SERVER] AUTOMATA TRANSITION: LOBBY -> GAME_SETUP")
 
                             player_decks = {
@@ -125,10 +148,7 @@ def handle_client(conn, addr, player_id):
                                     continue
 
                                 viewer_id = lobby.ready_players[session_player_id]["player_id"]
-
-                                personalized_state = current_game_state.to_personalized_dict(
-                                    viewer_id
-                                )
+                                personalized_state = current_game_state.to_personalized_dict(viewer_id)
 
                                 personalized_update = {
                                     "type": "GAME_STATE_UPDATE",
@@ -143,16 +163,12 @@ def handle_client(conn, addr, player_id):
                                     f"INITIAL STATE to Player {session_player_id}"
                                 )
                         else:
-                            # While still waiting in the lobby, reply only to the player
-                            # who most recently sent PLAYER_READY.
                             send_pdu(
                                 conn,
                                 update_msg,
                                 VERBOSE,
                                 f"LOBBY STATE to Player {player_id}"
                             )
-                            # We will add the logic to broadcast to both clients and start 
-                            # shuffling decks in the next step.
 
                 elif pdu.type == "MULLIGAN_CHOICE":
                     if current_game_state is None:
@@ -169,10 +185,7 @@ def handle_client(conn, addr, player_id):
 
                     if not pdu.keep:
                         current_game_state.mulligan_redraw(game_player_id)
-
-                        redraw_state = current_game_state.to_personalized_dict(
-                            game_player_id
-                        )
+                        redraw_state = current_game_state.to_personalized_dict(game_player_id)
 
                         redraw_update = {
                             "type": "GAME_STATE_UPDATE",
@@ -186,22 +199,9 @@ def handle_client(conn, addr, player_id):
                             VERBOSE,
                             f"MULLIGAN REDRAW to Player {player_id}"
                         )
-
-                        mulligan_count = (
-                            current_game_state.players[game_player_id].mulligan_count
-                        )
-
-                        print(
-                            f"[SERVER] {game_player_id} redrew their opening hand. "
-                            f"Mulligan count: {mulligan_count}"
-                        )
-
                         continue
 
-                    error = current_game_state.mulligan_keep(
-                        game_player_id,
-                        pdu.cards_to_bottom
-                    )
+                    error = current_game_state.mulligan_keep(game_player_id, pdu.cards_to_bottom)
 
                     if error:
                         error_msg = {
@@ -233,16 +233,12 @@ def handle_client(conn, addr, player_id):
                             turn=current_game_state.turn
                         )
 
-                        print(
-                            "[SERVER] AUTOMATA TRANSITION: "
-                            "MULLIGAN -> IN_GAME / UNTAP"
-                        )
+                        print("[SERVER] AUTOMATA TRANSITION: MULLIGAN -> IN_GAME / UNTAP")
 
                         for session_player_id, session in sessions.items():
                             if not session["connected"]:
                                 continue
 
-                            # Inform the client that the phase changed.
                             send_pdu(
                                 session["conn"],
                                 transition_pdu,
@@ -250,12 +246,8 @@ def handle_client(conn, addr, player_id):
                                 f"PHASE_TRANSITION to Player {session_player_id}"
                             )
 
-                            # Send the updated personalized state so the UI redraws.
                             viewer_id = lobby.ready_players[session_player_id]["player_id"]
-
-                            personalized_state = current_game_state.to_personalized_dict(
-                                viewer_id
-                            )
+                            personalized_state = current_game_state.to_personalized_dict(viewer_id)
 
                             state_update = {
                                 "type": "GAME_STATE_UPDATE",
@@ -270,8 +262,47 @@ def handle_client(conn, addr, player_id):
                                 f"UPDATED STATE to Player {session_player_id}"
                             )
 
+                elif pdu.type == "CONCEDE":
+                    game_player_id = lobby.ready_players.get(player_id, {}).get("player_id", str(player_id))
+                    print(f"\n[SERVER] {game_player_id} conceded.")
+                    
+                    remaining_player = 1 if player_id == 2 else 2
+                    winner_logical_id = lobby.ready_players.get(remaining_player, {}).get("player_id", str(remaining_player))
+                    
+                    seq = current_game_state.next_seq() if current_game_state else 999
+                    game_over_pdu = build_game_over(
+                        seq_num=seq, 
+                        winner_id=winner_logical_id, 
+                        loser_id=game_player_id, 
+                        reason="CONCEDE"
+                    )
+                    
+                    for session_player_id, session in sessions.items():
+                        if session["connected"]:
+                            send_pdu(session["conn"], game_over_pdu, VERBOSE, f"GAME_OVER to Player {session_player_id}")
+                            
+                    current_game_state = None
+                    turn_manager = None
+                    stack_manager = None
+                    priority_manager = None
+                    lobby.ready_players.clear()
+                    print("[SERVER] Game over. Returned to LOBBY state.")
+
+                elif pdu.type in ["PRIORITY_PASS", "PLAY_LAND", "CAST_SPELL", "ACTIVATE_ABILITY", "DISCARD", "DECLARE_ATTACKERS", "DECLARE_BLOCKERS", "ASSIGN_DAMAGE_ORDER"]:
+                    if current_game_state is None:
+                        error_msg = {
+                            "type": "ERROR",
+                            "seq_num": pdu.seq_num,
+                            "code": "ILLEGAL_ACTION",
+                            "message": "Game has not started yet."
+                        }
+                        send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
+                        continue
+                        
+                    game_player_id = lobby.ready_players[player_id]["player_id"]
+                    route_gameplay_pdu(pdu, game_player_id, turn_manager, stack_manager, priority_manager)
+
             except ValidationError as e:
-                # Catch invalid schemas, missing fields, or illegal decks
                 print(f"[SERVER] Validation rejected action from Player {player_id}")
                 error_msg = {
                     "type": "ERROR",
@@ -283,7 +314,6 @@ def handle_client(conn, addr, player_id):
                 send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
 
             except ValueError as e:
-                # Catch UNKNOWN_TYPE
                 error_msg = {
                     "type": "ERROR",
                     "seq_num": raw_dict.get("seq_num", 0),
@@ -297,14 +327,11 @@ def handle_client(conn, addr, player_id):
         print(f"\n[SERVER] Network drop detected for Player {player_id}.")
     finally:
         print(f"[SERVER] Player {player_id} disconnected. Starting {RECONNECT_TIMEOUT}s reconnect timer...")
-        
-        # Flag the player as disconnected and start the countdown
         if player_id in sessions:
             sessions[player_id]["connected"] = False
             timer = threading.Timer(RECONNECT_TIMEOUT, trigger_forfeit, args=[player_id])
             sessions[player_id]["timer"] = timer
             timer.start()
-            
         conn.close()
 
 def main():
@@ -325,22 +352,18 @@ def main():
         print("[SERVER] Verbose mode is ON.")
     
     try:
-        # Continuous loop to accept new connections and reconnections
         while True:
             conn, addr = server_sock.accept()
             assigned_id = None
             
-            # 1. Check if there is a disconnected slot we can put this player into
             for pid, state in sessions.items():
                 if not state["connected"]:
                     assigned_id = pid
                     break
             
-            # 2. If no disconnected slots, check if there is room for a brand new player
             if not assigned_id and len(sessions) < 2:
                 assigned_id = len(sessions) + 1
                 
-            # 3. Route them to the game or reject them
             if assigned_id:
                 thread = threading.Thread(target=handle_client, args=(conn, addr, assigned_id), daemon=True)
                 thread.start()
@@ -348,7 +371,7 @@ def main():
                 print(f"[SERVER] Rejected connection from {addr}: Lobby full.")
                 error_msg = {
                     "type": "ERROR",
-                    "error_code": "LOBBY_FULL",
+                    "code": "LOBBY_FULL",
                     "message": "The server already has two active players."
                 }
                 send_pdu(conn, error_msg, VERBOSE, "to rejected client")
