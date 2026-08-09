@@ -35,6 +35,7 @@
 │   │   └── card_catalog.json
 │   ├── network_utils.py
 │   └── pdu.py
-└── structure.txt
+├── structure.txt
+└── test_week2_demo.py
 
-10 directories, 28 files
+10 directories, 29 files
