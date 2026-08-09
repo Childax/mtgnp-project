@@ -63,10 +63,9 @@ def resolve_doom_blade(server_state, controller_id, targets):
     if not targets: return server_state
     target = targets[0]
 
-    # Look up the target's base properties in the catalog
-    target_base_card = target.rsplit('_', 1)[0] # e.g., extracts 'grizzly_bears' from 'grizzly_bears_001'
-    # Fallback to direct ID match due to catalog formatting
-    catalog_entry = CARD_CATALOG.get(target) 
+    # The catalog is keyed by full card instance IDs (e.g.
+    # 'grizzly_bears_001'), not base names, so look the target up directly.
+    catalog_entry = CARD_CATALOG.get(target)
     
     if not catalog_entry: 
         return server_state # Invalid target
@@ -91,8 +90,12 @@ def resolve_terror(server_state, controller_id, targets):
     if not targets: return server_state
     target = targets[0]
 
-    target_base_card = target.rsplit('_', 1)[0]
-    catalog_entry = CARD_CATALOG.get(target_base_card) 
+    # BUGFIX: this previously looked up CARD_CATALOG by the target's
+    # base name (e.g. 'grizzly_bears'), but the catalog is keyed by
+    # full card instance IDs (e.g. 'grizzly_bears_001'). That lookup
+    # always returned None, so Terror silently fizzled on every legal
+    # target. Look the target up directly, same as resolve_doom_blade.
+    catalog_entry = CARD_CATALOG.get(target)
     
     if not catalog_entry: 
         return server_state 

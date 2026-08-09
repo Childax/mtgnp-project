@@ -19,7 +19,7 @@ from typing import Callable
 from collections import defaultdict
 
 from shared.pdu import ErrorCode, build_game_state_update, build_combat_damage_result
-from server.core.game_state import GameState
+from server.core.game_state import GameState, broadcast_personalized_state
 
 
 class CombatManager:
@@ -45,10 +45,25 @@ class CombatManager:
         self.damage_order: dict[str, list[str]] = {}  # attacker_id -> ordered blocker_ids
         self._awaiting_player: str | None = None
 
+        # Flags TurnManager._advance_step() reads (via TurnManager's
+        # wired combat_manager reference) to know whether to skip an
+        # empty Declare Attackers / Declare Blockers / damage-order
+        # step. Initialized here so they're never missing on first
+        # access even before reset() has run once.
+        self.any_attackers_declared: bool = False
+        self.any_multi_blocked: bool = False
+        self.any_first_or_double_strike: bool = False
+        self._fs_ds_seen: bool = False
+
     def reset(self) -> None:
+        """Called by TurnManager at the start of each Begin Combat Step."""
         self.attackers.clear()
         self.blockers.clear()
         self.damage_order.clear()
+        self.any_attackers_declared = False
+        self.any_multi_blocked = False
+        self.any_first_or_double_strike = False
+        self._fs_ds_seen = False
 
     # -- CMB-01: Declare Attackers -----------------------------------------
 
@@ -103,11 +118,7 @@ class CombatManager:
             if perm.has_first_strike or perm.has_double_strike:
                 self._mark_fs_ds_present()
 
-        self.state.turn_manager_any_attackers_declared = len(self.attackers) > 0  # informational
-
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(), self.state.to_personalized_dict(player_id),
-        ))
+        broadcast_personalized_state(self.state, self.send_fn)
 
         # Signal TurnManager whether combat continues past this step
         # (RFC 9.3: empty attackers -> skip straight to End of Combat).
@@ -165,9 +176,7 @@ class CombatManager:
             self.blockers[entry["blocking_id"]].append(entry["creature_id"])
             # Blocking does not tap the blocker (RFC 9.4).
 
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(), self.state.to_personalized_dict(player_id),
-        ))
+        broadcast_personalized_state(self.state, self.send_fn)
 
         self.any_multi_blocked = any(len(bs) >= 2 for bs in self.blockers.values())
         self.any_first_or_double_strike = getattr(self, "_fs_ds_seen", False) or \

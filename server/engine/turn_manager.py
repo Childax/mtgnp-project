@@ -17,7 +17,9 @@ from shared.pdu import (
     Phase, PDUType, ErrorCode, build_phase_transition, build_game_state_update,
     build_error,
 )
-from server.core.game_state import GameState, Permanent, build_permanent_from_catalog
+from server.core.game_state import (
+    GameState, Permanent, build_permanent_from_catalog, broadcast_personalized_state,
+)
 from server.engine.priority import PriorityManager, PriorityError
 
 
@@ -59,18 +61,27 @@ class TurnManager:
 
         self._stack_resolver: Optional[Callable[[], None]] = None
         self._combat_hooks: dict[str, Callable] = {}
+        self._combat = None  # CombatManager instance, set by wire_dependencies()
         self._awaiting_discard: bool = False
 
     def wire_dependencies(self, stack_resolver: Callable[[], None],
-                           combat_hooks: dict) -> None:
+                           combat_hooks: dict, combat_manager=None) -> None:
         """
         stack_resolver: StackManager.resolve_top() -- called when both
             players pass with a non-empty stack.
         combat_hooks: dict of callables from CombatManager, keyed by
             step name, e.g. {"DECLARE_ATTACKERS": combat.begin_declare_attackers, ...}
+        combat_manager: the CombatManager instance itself. Needed
+            because combat.py sets any_attackers_declared /
+            any_multi_blocked / any_first_or_double_strike on ITS OWN
+            self, not on TurnManager's self -- without this reference
+            _advance_step() below would always see the stale, never-set
+            False defaults on TurnManager and combat would never know
+            to skip an empty Declare Attackers / Declare Blockers step.
         """
         self._stack_resolver = stack_resolver
         self._combat_hooks = combat_hooks
+        self._combat = combat_manager
 
     def register_cleanup_hook(self, hook: Callable[[], None]) -> None:
         """Allows external modules (e.g. card effects) to clear until-end-of-turn state."""
@@ -104,10 +115,7 @@ class TurnManager:
                 permanent.summoning_sick = False
         ap.land_played_this_turn = False
 
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(),
-            self.state.to_personalized_dict(self.state.active_player),
-        ))
+        broadcast_personalized_state(self.state, self.send_fn)
 
         self._transition_to(Phase.UPKEEP)
 
@@ -136,10 +144,9 @@ class TurnManager:
         drawn = ap.library.pop(0)
         ap.hand.append(drawn)
 
-        self.send_fn(self.state.active_player, build_game_state_update(
-            self.state.next_seq(),
-            self.state.to_personalized_dict(self.state.active_player),
-        ))
+        # Broadcast to both -- the opponent's library_counts also
+        # changes even though only the Active Player's hand grew.
+        broadcast_personalized_state(self.state, self.send_fn)
         self._open_priority_for_current_step()
 
     def run_cleanup_step(self) -> None:
@@ -178,9 +185,7 @@ class TurnManager:
             ap.hand.remove(cid)
             ap.graveyard.append(cid)
 
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(), self.state.to_personalized_dict(player_id),
-        ))
+        broadcast_personalized_state(self.state, self.send_fn)
 
         if len(ap.hand) > 7:
             self.send_fn(player_id, build_game_state_update(
@@ -200,11 +205,9 @@ class TurnManager:
         # Run external end-of-turn cleanup hooks (e.g., Giant Growth)
         for hook in self.cleanup_hooks:
             hook()
+        self.cleanup_hooks.clear()
 
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(),
-            self.state.to_personalized_dict(self.state.active_player),
-        ))
+        broadcast_personalized_state(self.state, self.send_fn)
 
         next_active = self.state.opponent_of(self.state.active_player)
         self.state.active_player = next_active
@@ -231,22 +234,33 @@ class TurnManager:
         current = self.state.phase
         idx = Phase.ORDER.index(current)
 
-        if current == Phase.DECLARE_ATTACKERS and not self.any_attackers_declared:
+        # combat.py sets these flags on the CombatManager instance
+        # itself, not on TurnManager -- read from there when wired.
+        if self._combat is not None:
+            any_attackers = self._combat.any_attackers_declared
+            any_multi = self._combat.any_multi_blocked
+            any_fsds = self._combat.any_first_or_double_strike
+        else:
+            any_attackers = self.any_attackers_declared
+            any_multi = self.any_multi_blocked
+            any_fsds = self.any_first_or_double_strike
+
+        if current == Phase.DECLARE_ATTACKERS and not any_attackers:
             self._transition_to(Phase.END_OF_COMBAT)
             return
 
-        if current == Phase.DECLARE_BLOCKERS and not self.any_multi_blocked:
-            if self.any_first_or_double_strike:
+        if current == Phase.DECLARE_BLOCKERS and not any_multi:
+            if any_fsds:
                 self._transition_to(Phase.FIRST_STRIKE_DAMAGE)
             else:
                 self._transition_to(Phase.COMBAT_DAMAGE)
             return
 
-        if current == Phase.ASSIGN_DAMAGE_ORDER and not self.any_first_or_double_strike:
+        if current == Phase.ASSIGN_DAMAGE_ORDER and not any_fsds:
             self._transition_to(Phase.COMBAT_DAMAGE)
             return
 
-        if current == Phase.FIRST_STRIKE_DAMAGE and not self.any_first_or_double_strike:
+        if current == Phase.FIRST_STRIKE_DAMAGE and not any_fsds:
             self._transition_to(Phase.COMBAT_DAMAGE)
             return
 
@@ -271,6 +285,8 @@ class TurnManager:
             self.any_attackers_declared = False
             self.any_multi_blocked = False
             self.any_first_or_double_strike = False
+            if self._combat is not None:
+                self._combat.reset()
             self._open_priority_for_current_step()
         elif to_phase in self._combat_hooks:
             self._combat_hooks[to_phase]()
@@ -335,9 +351,7 @@ class TurnManager:
         ap.battlefield.append(land)
         ap.land_played_this_turn = True
 
-        self.broadcast_fn(build_game_state_update(
-            self.state.next_seq(), self.state.to_personalized_dict(player_id),
-        ))
-        
+        broadcast_personalized_state(self.state, self.send_fn)
+
         # Active Player retains priority after playing a land (RFC 7.5)
         self.priority.reopen_after_stack_action(player_id)

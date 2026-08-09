@@ -23,8 +23,10 @@ Sections:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import random
+
+from shared.pdu import build_game_state_update
  
  
 # ---------------------------------------------------------------------------
@@ -349,6 +351,24 @@ class GameState:
         }
  
  
+def broadcast_personalized_state(state: "GameState",
+                                  send_fn: Callable[[str, dict], None]) -> None:
+    """
+    Sends each player their OWN personalized GAME_STATE_UPDATE.
+
+    IMPORTANT: this must be used instead of a single
+    broadcast_fn(build_game_state_update(seq, state.to_personalized_dict(X)))
+    call. to_personalized_dict(X) embeds player X's hand in the "hand"
+    key -- broadcasting that one dict to both clients leaks X's hidden
+    hand to the opponent, which RFC 0001 Section 4.2 / 12 explicitly
+    forbids ("the server MUST withhold hidden information ... from
+    GAME_STATE_UPDATE messages"). Each player must get a separately
+    built dict via send_fn, never via broadcast_fn.
+    """
+    for pid in state.players:
+        send_fn(pid, build_game_state_update(state.next_seq(), state.to_personalized_dict(pid)))
+
+
 def build_lobby_state_dict(players_ready: int, waiting_for: list) -> dict:
     """
     RFC 10.2.2 LOBBY-phase variant. Standalone function (not a

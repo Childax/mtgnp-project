@@ -14,6 +14,9 @@ from shared.pdu import parse_pdu, build_phase_transition, build_game_over
 from server.core.lifecycle import LobbyManager
 from server.core.game_state import GameState
 from server.network.router import route_gameplay_pdu
+from server.engine.turn_manager import TurnManager
+from server.engine.stack_manager import StackManager
+from server.engine.combat import CombatManager
 
 
 HOST = '127.0.0.1'
@@ -24,48 +27,133 @@ sessions = {}
 lobby = LobbyManager()
 RECONNECT_TIMEOUT = 60.0
 
-# Member 3 initialize this
 current_game_state = None
 turn_manager = None
 stack_manager = None
 priority_manager = None
+combat_manager = None
+
+
+# ---------------------------------------------------------------------------
+# send_fn / broadcast_fn wrappers -- the engine modules (TurnManager,
+# StackManager, CombatManager, PriorityManager) never touch sockets
+# directly; they call these two functions, which translate a logical
+# player_id (the client-chosen string from PLAYER_READY) into the
+# numeric session id (1 or 2) used by `sessions`, and send framed PDUs.
+# ---------------------------------------------------------------------------
+
+def _session_id_for_logical(game_player_id):
+    """Maps a logical player_id (e.g. 'player_1') back to its numeric session id (1 or 2)."""
+    for session_id, data in lobby.ready_players.items():
+        if data.get("player_id") == game_player_id:
+            return session_id
+    return None
+
+def send_to_player(game_player_id, pdu):
+    session_id = _session_id_for_logical(game_player_id)
+    if session_id is None:
+        return
+    session = sessions.get(session_id)
+    if session and session.get("connected"):
+        send_pdu(session["conn"], pdu, VERBOSE, f"to {game_player_id}")
+
+def broadcast_to_all(pdu):
+    for session_id, session in sessions.items():
+        if session.get("connected"):
+            send_pdu(session["conn"], pdu, VERBOSE, "broadcast")
+
+
+def handle_engine_game_over(winner_id, loser_id, reason):
+    """
+    on_game_over callback wired into TurnManager/StackManager. Also
+    reused directly for CONCEDE and reconnect-timeout forfeits so all
+    GAME_OVER paths reset the same set of globals the same way.
+    """
+    global current_game_state, turn_manager, stack_manager, priority_manager, combat_manager
+    print(f"\n[SERVER] GAME_OVER: winner={winner_id} loser={loser_id} reason={reason}")
+
+    seq = current_game_state.next_seq() if current_game_state else 999
+    game_over_pdu = build_game_over(
+        seq_num=seq, winner_id=winner_id, loser_id=loser_id, reason=reason,
+    )
+    broadcast_to_all(game_over_pdu)
+
+    current_game_state = None
+    turn_manager = None
+    stack_manager = None
+    priority_manager = None
+    combat_manager = None
+    lobby.ready_players.clear()
+    print("[SERVER] Game over. Returned to LOBBY state.")
+
+
+def start_in_game_engine():
+    """
+    Instantiates TurnManager, StackManager, and CombatManager against
+    the current GameState, wires them together, and begins Turn 1.
+    Called once both players have kept their opening hand (RFC 6.4
+    transition: MULLIGAN -> IN_GAME).
+    """
+    global turn_manager, stack_manager, priority_manager, combat_manager
+
+    # TurnManager creates its own PriorityManager internally
+    # (self.priority) -- there's no separate PriorityManager to build
+    # by hand here.
+    turn_manager = TurnManager(
+        state=current_game_state,
+        send_fn=send_to_player,
+        broadcast_fn=broadcast_to_all,
+        on_game_over=handle_engine_game_over,
+        first_player_id=current_game_state.first_player_id,
+    )
+
+    stack_manager = StackManager(
+        state=current_game_state,
+        send_fn=send_to_player,
+        broadcast_fn=broadcast_to_all,
+        on_game_over=handle_engine_game_over,
+        reopen_priority_for_actor=turn_manager.priority.reopen_after_stack_action,
+        reopen_priority_after_resolution=turn_manager.priority.reopen_after_resolution,
+        register_cleanup_hook_fn=turn_manager.register_cleanup_hook,
+    )
+
+    combat_manager = CombatManager(
+        state=current_game_state,
+        send_fn=send_to_player,
+        broadcast_fn=broadcast_to_all,
+        reject_fn=turn_manager.reject_illegal_action,
+        open_priority_fn=turn_manager._open_priority_for_current_step,
+        advance_to_fn=turn_manager._transition_to,
+        run_sba_fn=stack_manager.run_state_based_actions,
+    )
+
+    combat_hooks = {
+        "DECLARE_ATTACKERS": combat_manager.begin_declare_attackers,
+        "DECLARE_BLOCKERS": combat_manager.begin_declare_blockers,
+        "ASSIGN_DAMAGE_ORDER": combat_manager.begin_assign_damage_order,
+        "FIRST_STRIKE_DAMAGE": combat_manager.run_first_strike_damage,
+        "COMBAT_DAMAGE": combat_manager.run_combat_damage,
+    }
+    turn_manager.wire_dependencies(stack_manager.resolve_top, combat_hooks, combat_manager)
+    priority_manager = turn_manager.priority
+
+    print("[SERVER] AUTOMATA TRANSITION: MULLIGAN -> IN_GAME")
+    turn_manager.start_turn()
+
 
 def trigger_forfeit(player_id):
     """Called when a player fails to reconnect within the time limit."""
-    global current_game_state, turn_manager, stack_manager, priority_manager
     if sessions.get(player_id) and not sessions[player_id]["connected"]:
         print(f"\n[SERVER] Player {player_id} failed to reconnect in time. FORFEIT.")
-        
+
         remaining_player = 1 if player_id == 2 else 2
-        
-        if sessions.get(remaining_player) and sessions[remaining_player]["connected"]:
-            seq = current_game_state.next_seq() if current_game_state else 999
-            
-            loser_logical_id = lobby.ready_players.get(player_id, {}).get("player_id", str(player_id))
-            winner_logical_id = lobby.ready_players.get(remaining_player, {}).get("player_id", str(remaining_player))
-            
-            game_over_pdu = build_game_over(
-                seq_num=seq, 
-                winner_id=winner_logical_id, 
-                loser_id=loser_logical_id, 
-                reason="DISCONNECT"
-            )
-            send_pdu(
-                sessions[remaining_player]["conn"], 
-                game_over_pdu, 
-                VERBOSE, 
-                f"GAME_OVER to Player {remaining_player}"
-            )
-            
-        current_game_state = None
-        turn_manager = None
-        stack_manager = None
-        priority_manager = None
-        lobby.ready_players.clear()
-        print("[SERVER] Game over. Returned to LOBBY state.")
+        loser_logical_id = lobby.ready_players.get(player_id, {}).get("player_id", str(player_id))
+        winner_logical_id = lobby.ready_players.get(remaining_player, {}).get("player_id", str(remaining_player))
+
+        handle_engine_game_over(winner_logical_id, loser_logical_id, "DISCONNECT")
 
 def handle_client(conn, addr, player_id):
-    global current_game_state, turn_manager, stack_manager, priority_manager
+    global current_game_state, turn_manager, stack_manager, priority_manager, combat_manager
     print(f"[SERVER] Player {player_id} connected from {addr}")
     
     if player_id in sessions and sessions[player_id].get("timer"):
@@ -221,72 +309,21 @@ def handle_client(conn, addr, player_id):
                     )
 
                     if both_players_kept:
-                        current_game_state.turn = 1
-                        current_game_state.phase = "UNTAP"
-                        current_game_state.priority_holder = None
-
-                        transition_pdu = build_phase_transition(
-                            seq_num=current_game_state.next_seq(),
-                            from_phase="MULLIGAN",
-                            to_phase="UNTAP",
-                            active_player=current_game_state.active_player,
-                            turn=current_game_state.turn
-                        )
-
-                        print("[SERVER] AUTOMATA TRANSITION: MULLIGAN -> IN_GAME / UNTAP")
-
-                        for session_player_id, session in sessions.items():
-                            if not session["connected"]:
-                                continue
-
-                            send_pdu(
-                                session["conn"],
-                                transition_pdu,
-                                VERBOSE,
-                                f"PHASE_TRANSITION to Player {session_player_id}"
-                            )
-
-                            viewer_id = lobby.ready_players[session_player_id]["player_id"]
-                            personalized_state = current_game_state.to_personalized_dict(viewer_id)
-
-                            state_update = {
-                                "type": "GAME_STATE_UPDATE",
-                                "seq_num": current_game_state.next_seq(),
-                                "state": personalized_state
-                            }
-
-                            send_pdu(
-                                session["conn"],
-                                state_update,
-                                VERBOSE,
-                                f"UPDATED STATE to Player {session_player_id}"
-                            )
+                        # TurnManager.start_turn() drives everything
+                        # from here: it broadcasts the MULLIGAN->UNTAP
+                        # PHASE_TRANSITION itself, runs Untap, and opens
+                        # the Upkeep priority window -- no manual PDU
+                        # construction needed here anymore.
+                        start_in_game_engine()
 
                 elif pdu.type == "CONCEDE":
                     game_player_id = lobby.ready_players.get(player_id, {}).get("player_id", str(player_id))
                     print(f"\n[SERVER] {game_player_id} conceded.")
-                    
+
                     remaining_player = 1 if player_id == 2 else 2
                     winner_logical_id = lobby.ready_players.get(remaining_player, {}).get("player_id", str(remaining_player))
-                    
-                    seq = current_game_state.next_seq() if current_game_state else 999
-                    game_over_pdu = build_game_over(
-                        seq_num=seq, 
-                        winner_id=winner_logical_id, 
-                        loser_id=game_player_id, 
-                        reason="CONCEDE"
-                    )
-                    
-                    for session_player_id, session in sessions.items():
-                        if session["connected"]:
-                            send_pdu(session["conn"], game_over_pdu, VERBOSE, f"GAME_OVER to Player {session_player_id}")
-                            
-                    current_game_state = None
-                    turn_manager = None
-                    stack_manager = None
-                    priority_manager = None
-                    lobby.ready_players.clear()
-                    print("[SERVER] Game over. Returned to LOBBY state.")
+
+                    handle_engine_game_over(winner_logical_id, game_player_id, "CONCEDE")
 
                 elif pdu.type in ["PRIORITY_PASS", "PLAY_LAND", "CAST_SPELL", "ACTIVATE_ABILITY", "DISCARD", "DECLARE_ATTACKERS", "DECLARE_BLOCKERS", "ASSIGN_DAMAGE_ORDER"]:
                     if current_game_state is None:
@@ -298,9 +335,12 @@ def handle_client(conn, addr, player_id):
                         }
                         send_pdu(conn, error_msg, VERBOSE, f"ERROR to Player {player_id}")
                         continue
-                        
+
                     game_player_id = lobby.ready_players[player_id]["player_id"]
-                    route_gameplay_pdu(pdu, game_player_id, turn_manager, stack_manager, priority_manager)
+                    route_gameplay_pdu(
+                        pdu, game_player_id, turn_manager, stack_manager,
+                        priority_manager, combat_manager,
+                    )
 
             except ValidationError as e:
                 print(f"[SERVER] Validation rejected action from Player {player_id}")

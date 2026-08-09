@@ -17,7 +17,11 @@ from shared.pdu import (
     ErrorCode, ItemType, Phase, ResolveResult, build_stack_push, build_stack_resolve,
     build_game_state_update, build_error,
 )
-from server.core.game_state import GameState, StackItem, Permanent, build_permanent_from_catalog
+from server.core.game_state import (
+    GameState, StackItem, Permanent, build_permanent_from_catalog,
+    broadcast_personalized_state,
+)
+from server.engine.card_effects import EFFECT_REGISTRY
 
 
 _id_counter = itertools.count(1)
@@ -34,13 +38,20 @@ class StackManager:
                  on_game_over: Callable[[str, str, str], None],
                  reopen_priority_for_actor: Callable[[str], None],
                  reopen_priority_after_resolution: Callable[[], None],
-                 card_catalog: Optional[dict] = None):
+                 card_catalog: Optional[dict] = None,
+                 register_cleanup_hook_fn: Optional[Callable[[Callable[[], None]], None]] = None):
         self.state = state
         self.send_fn = send_fn
         self.broadcast_fn = broadcast_fn
         self.on_game_over = on_game_over
         self.reopen_priority_for_actor = reopen_priority_for_actor
         self.reopen_priority_after_resolution = reopen_priority_after_resolution
+        # register_cleanup_hook_fn: TurnManager.register_cleanup_hook.
+        # Used so temporary combat-trick effects (e.g. Giant Growth's
+        # +3/+3) revert automatically at the next Cleanup Step instead
+        # of being permanent (RFC 1 says MTGNP 1.0 has no replacement
+        # effects, but "until end of turn" pumps still need to expire).
+        self.register_cleanup_hook_fn = register_cleanup_hook_fn
         # card_catalog: out-of-band shared catalog per RFC intro note.
         # Expected shape per card_id: {"mana_cost": {...}, "type": "INSTANT"|"SORCERY"|"CREATURE"|"LAND"|"ARTIFACT"|"ENCHANTMENT", ...}
         if card_catalog is None:
@@ -213,10 +224,7 @@ class StackManager:
                 state_changes,
             )
             self.broadcast_fn(pdu)
-            self.broadcast_fn(build_game_state_update(
-                self.state.next_seq(),
-                self.state.to_personalized_dict(item.controller_id),
-            ))
+            broadcast_personalized_state(self.state, self.send_fn)
 
         self.run_state_based_actions()
         if not self.state.game_over:
@@ -226,6 +234,12 @@ class StackManager:
         for target in item.targets:
             if target in self.state.players:
                 continue  # player targets are always "legal" unless dead
+            # Counterspell-type effects target a stack_item_id, not a
+            # player or permanent -- legal as long as that item is
+            # still on the stack (it may have already resolved or been
+            # itself countered).
+            if any(si.stack_item_id == target for si in self.state.stack):
+                continue
             found = any(
                 ps.find_permanent(target) is not None
                 for ps in self.state.players.values()
@@ -267,12 +281,140 @@ class StackManager:
             })
             return state_changes
 
-        # TODO (CARD-01..05): Dispatch INSTANT/SORCERY/ABILITY one-off
-        # effects here once that module exists, e.g.:
-        #   effect_type = card_info.get("effect")
-        #   if effect_type == "DAMAGE":
-        #       ... apply card_info["amount"] to item.targets ...
-        return state_changes
+        # CARD-01..05: one-off INSTANT/SORCERY/ABILITY effects (direct
+        # damage, buff, bounce, destroy, counter). card_effects.py's
+        # EFFECT_REGISTRY functions were written against a plain-dict
+        # "server_state" shape (matching card_effects.py's own
+        # docstrings), not the GameState/PlayerState/Permanent objects
+        # this engine actually uses -- so we build a dict snapshot,
+        # hand it to the registered effect function, then translate
+        # whatever changed back onto the real GameState objects.
+        base_name = item.source_id.rsplit("_", 1)[0]
+        effect_fn = EFFECT_REGISTRY.get(base_name)
+        if effect_fn is None:
+            # No effect implemented for this card (e.g. it's a card
+            # outside the five required effects) -- resolves as a no-op.
+            return state_changes
+
+        snapshot = self._build_effect_snapshot()
+        before_life = dict(snapshot["life_totals"])
+
+        effect_fn(snapshot, item.controller_id, item.targets)
+
+        return self._sync_effect_snapshot(snapshot, before_life, item)
+
+    def _build_effect_snapshot(self) -> dict:
+        """Plain-dict view of state, shaped for card_effects.py's functions."""
+        return {
+            "life_totals": {
+                pid: ps.life_total for pid, ps in self.state.players.items()
+            },
+            "battlefield": {
+                pid: [
+                    {"id": p.id, "damage": p.damage, "power": p.power,
+                     "toughness": p.toughness}
+                    for p in ps.battlefield
+                ]
+                for pid, ps in self.state.players.items()
+            },
+            "hand": {pid: list(ps.hand) for pid, ps in self.state.players.items()},
+            "graveyard": {pid: list(ps.graveyard) for pid, ps in self.state.players.items()},
+            "stack": [
+                {"stack_item_id": si.stack_item_id, "controller": si.controller_id,
+                 "source": si.source_id}
+                for si in self.state.stack
+            ],
+        }
+
+    def _sync_effect_snapshot(self, snapshot: dict, before_life: dict,
+                               item: StackItem) -> list[dict]:
+        """
+        Diffs the mutated snapshot dict against the real GameState and
+        applies every change back onto the real Permanent/PlayerState
+        objects, returning a state_changes[] list for STACK_RESOLVE.
+        """
+        changes: list[dict] = []
+
+        # 1. Life totals (direct damage / life gain effects).
+        for pid, new_total in snapshot["life_totals"].items():
+            old_total = before_life.get(pid, new_total)
+            if new_total != old_total:
+                self.state.players[pid].life_total = new_total
+                changes.append({
+                    "change_type": "DAMAGE" if new_total < old_total else "LIFE_GAIN",
+                    "target": pid,
+                    "amount": abs(old_total - new_total),
+                })
+
+        # 2. Battlefield: damage/power/toughness edits, and permanents
+        #    that vanished from the snapshot (bounced or destroyed).
+        for pid, ps in self.state.players.items():
+            snap_board = snapshot["battlefield"].get(pid, [])
+            for perm in list(ps.battlefield):
+                snap_perm = next((p for p in snap_board if p["id"] == perm.id), None)
+                if snap_perm is None:
+                    ps.battlefield.remove(perm)
+                    if perm.id in snapshot["hand"].get(pid, []):
+                        changes.append({"change_type": "BOUNCE", "target": perm.id})
+                    else:
+                        changes.append({"change_type": "DESTROY", "target": perm.id})
+                    continue
+                if snap_perm["damage"] != perm.damage:
+                    perm.damage = snap_perm["damage"]
+                if snap_perm["power"] != perm.power or snap_perm["toughness"] != perm.toughness:
+                    power_delta = snap_perm["power"] - perm.power
+                    toughness_delta = snap_perm["toughness"] - perm.toughness
+                    perm.power = snap_perm["power"]
+                    perm.toughness = snap_perm["toughness"]
+                    changes.append({
+                        "change_type": "BUFF", "target": perm.id, "amount": power_delta,
+                    })
+                    # MTGNP 1.0 has no replacement effects, but a
+                    # combat trick's buff is still "until end of turn"
+                    # (RFC card text) -- register a revert for Cleanup.
+                    if self.register_cleanup_hook_fn is not None:
+                        self.register_cleanup_hook_fn(
+                            self._make_revert_hook(pid, perm.id, power_delta, toughness_delta)
+                        )
+
+        # 3. Hand: cards that newly appeared (bounce targets).
+        for pid, ps in self.state.players.items():
+            for cid in snapshot["hand"].get(pid, []):
+                if cid not in ps.hand:
+                    ps.hand.append(cid)
+
+        # 4. Graveyard: cards that newly appeared (destroyed permanents,
+        #    countered spells).
+        for pid, ps in self.state.players.items():
+            for cid in snapshot["graveyard"].get(pid, []):
+                if cid not in ps.graveyard:
+                    ps.graveyard.append(cid)
+
+        # 5. Stack: entries the effect removed (Counterspell).
+        remaining_ids = {si["stack_item_id"] for si in snapshot["stack"]}
+        for stack_item in list(self.state.stack):
+            if stack_item.stack_item_id not in remaining_ids:
+                self.state.stack.remove(stack_item)
+                changes.append({
+                    "change_type": "COUNTERED", "target": stack_item.stack_item_id,
+                })
+
+        if not changes:
+            changes.append({"change_type": "NO_EFFECT", "target": item.source_id})
+
+        return changes
+
+    def _make_revert_hook(self, pid: str, perm_id: str,
+                           power_delta: int, toughness_delta: int) -> Callable[[], None]:
+        def _revert() -> None:
+            ps = self.state.players.get(pid)
+            if ps is None:
+                return
+            perm = ps.find_permanent(perm_id)
+            if perm is not None:
+                perm.power -= power_delta
+                perm.toughness -= toughness_delta
+        return _revert
 
     # -- STK-03: state-based actions -----------------------------------------
 
