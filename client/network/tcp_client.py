@@ -25,6 +25,8 @@ latest_hand = []
 latest_active_player = None
 latest_battlefield = {}
 latest_life_totals = {}
+latest_phase_seq = 0
+attackers_request_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -59,6 +61,7 @@ def listen_for_messages(sock, ui=None):
     global latest_priority_seq, latest_phase
     global latest_hand, latest_active_player
     global latest_battlefield, latest_life_totals
+    global latest_phase_seq
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -136,6 +139,7 @@ def listen_for_messages(sock, ui=None):
 
                 elif pdu_type == "PHASE_TRANSITION":
                     latest_phase = pdu.get("to_phase", latest_phase)
+                    latest_phase_seq = pdu.get("seq_num", 0)
                     latest_active_player = pdu.get(
                         "active_player",
                         latest_active_player
@@ -145,6 +149,13 @@ def listen_for_messages(sock, ui=None):
                         f"\n[CLIENT] Phase changed: "
                         f"{pdu.get('from_phase')} -> {latest_phase}"
                     )
+
+                    if (
+                        ui
+                        and latest_phase == "DECLARE_ATTACKERS"
+                        and latest_active_player == ui.player_id
+                    ):
+                        attackers_request_received.set()
 
                 elif pdu_type == "PRIORITY_GRANT":
                     latest_priority_seq = pdu.get("seq_num", 0)
@@ -368,6 +379,81 @@ def prompt_spell_target(ui, creature_only=False):
 
         print("That target index is invalid.")
 
+def prompt_attackers(player_id, ui):
+    """Ask the active player which legal creatures should attack."""
+    legal_attackers = []
+
+    for permanent in latest_battlefield.get(player_id, []):
+        card_id = permanent.get("id")
+        card_info = ui.catalog.get(card_id, {})
+
+        is_creature = (
+            str(card_info.get("type", "")).lower()
+            == "creature"
+        )
+
+        if (
+            is_creature
+            and not permanent.get("tapped", False)
+            and not permanent.get("summoning_sick", False)
+        ):
+            legal_attackers.append(card_id)
+
+    if not legal_attackers:
+        print("[CLIENT] You have no legal attackers.")
+        return []
+
+    print("\nLegal attackers:")
+
+    for index, card_id in enumerate(legal_attackers):
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    while True:
+        choice = input(
+            "Choose attacker index(es), separated by spaces "
+            "(or press Enter for no attack): "
+        ).strip()
+
+        if not choice:
+            return []
+
+        try:
+            indexes = [int(value) for value in choice.split()]
+        except ValueError:
+            print("Please enter valid attacker indexes.")
+            continue
+
+        if len(set(indexes)) != len(indexes):
+            print("Do not choose the same attacker twice.")
+            continue
+
+        if any(
+            index < 0 or index >= len(legal_attackers)
+            for index in indexes
+        ):
+            print("One or more attacker indexes are invalid.")
+            continue
+
+        opponent_id = next(
+            (
+                pid
+                for pid in latest_life_totals
+                if pid != player_id
+            ),
+            None
+        )
+
+        return [
+            {
+                "creature_id": legal_attackers[index],
+                "target": opponent_id
+            }
+            for index in indexes
+        ]
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -474,7 +560,40 @@ def start_client(player_id, deck_list, verbose=False):
 
     try:
         while True:
-            priority_grant_received.wait()
+            while (
+                not priority_grant_received.is_set()
+                and not attackers_request_received.is_set()
+            ):
+                time.sleep(0.05)
+
+            if attackers_request_received.is_set():
+                attackers_request_received.clear()
+
+                attackers = prompt_attackers(
+                    player_id,
+                    ui
+                )
+
+                attackers_pdu = {
+                    "type": "DECLARE_ATTACKERS",
+                    "seq_num": latest_phase_seq,
+                    "attackers": attackers
+                }
+
+                send_pdu(
+                    client_sock,
+                    attackers_pdu,
+                    VERBOSE,
+                    "DECLARE_ATTACKERS to Server"
+                )
+
+                print(
+                    f"[CLIENT] Declared "
+                    f"{len(attackers)} attacker(s)."
+                )
+
+                continue
+
             priority_grant_received.clear()
 
             while True:
