@@ -27,6 +27,8 @@ latest_battlefield = {}
 latest_life_totals = {}
 latest_phase_seq = 0
 attackers_request_received = threading.Event()
+blockers_request_received = threading.Event()
+latest_attackers = []
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -62,6 +64,7 @@ def listen_for_messages(sock, ui=None):
     global latest_hand, latest_active_player
     global latest_battlefield, latest_life_totals
     global latest_phase_seq
+    global latest_attackers
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -102,10 +105,47 @@ def listen_for_messages(sock, ui=None):
                             state.get("hand", {}).get(ui.player_id, [])
                         )
 
+                    previous_battlefield = latest_battlefield
+
                     latest_battlefield = state.get(
                         "battlefield",
                         latest_battlefield
                     )
+
+                    if phase == "DECLARE_ATTACKERS" and latest_active_player:
+                        previous_by_id = {
+                            permanent.get("id"): permanent
+                            for permanent in previous_battlefield.get(
+                                latest_active_player,
+                                []
+                            )
+                        }
+
+                        latest_attackers = []
+
+                        for permanent in latest_battlefield.get(
+                            latest_active_player,
+                            []
+                        ):
+                            card_id = permanent.get("id")
+                            card_info = ui.catalog.get(card_id, {}) if ui else {}
+
+                            is_creature = (
+                                str(card_info.get("type", "")).lower()
+                                == "creature"
+                            )
+
+                            was_tapped = previous_by_id.get(
+                                card_id,
+                                {}
+                            ).get("tapped", False)
+
+                            if (
+                                is_creature
+                                and permanent.get("tapped", False)
+                                and not was_tapped
+                            ):
+                                latest_attackers.append(card_id)
 
                     latest_life_totals = state.get(
                         "life_totals",
@@ -156,6 +196,13 @@ def listen_for_messages(sock, ui=None):
                         and latest_active_player == ui.player_id
                     ):
                         attackers_request_received.set()
+
+                    if (
+                        ui
+                        and latest_phase == "DECLARE_BLOCKERS"
+                        and latest_active_player != ui.player_id
+                    ):
+                        blockers_request_received.set()
 
                 elif pdu_type == "PRIORITY_GRANT":
                     latest_priority_seq = pdu.get("seq_num", 0)
@@ -454,6 +501,101 @@ def prompt_attackers(player_id, ui):
             for index in indexes
         ]
 
+def prompt_blockers(player_id, ui):
+    """Ask the defending player to assign blockers."""
+    legal_blockers = []
+
+    for permanent in latest_battlefield.get(player_id, []):
+        card_id = permanent.get("id")
+        card_info = ui.catalog.get(card_id, {})
+
+        is_creature = (
+            str(card_info.get("type", "")).lower()
+            == "creature"
+        )
+
+        if is_creature and not permanent.get("tapped", False):
+            legal_blockers.append(card_id)
+
+    if not latest_attackers:
+        print("[CLIENT] No attackers to block.")
+        return []
+
+    if not legal_blockers:
+        print("[CLIENT] You have no legal blockers.")
+        return []
+
+    print("\nAttacking creatures:")
+
+    for index, card_id in enumerate(latest_attackers):
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    print("\nYour legal blockers:")
+
+    for index, card_id in enumerate(legal_blockers):
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    assignments = []
+    used_blockers = set()
+
+    while True:
+        choice = input(
+            "Choose blocker index "
+            "(or press Enter when finished): "
+        ).strip()
+
+        if not choice:
+            return assignments
+
+        try:
+            blocker_index = int(choice)
+        except ValueError:
+            print("Please enter a valid blocker index.")
+            continue
+
+        if (
+            blocker_index < 0
+            or blocker_index >= len(legal_blockers)
+        ):
+            print("That blocker index is invalid.")
+            continue
+
+        if blocker_index in used_blockers:
+            print("That creature is already blocking.")
+            continue
+
+        target_choice = input(
+            "Choose attacker index to block: "
+        ).strip()
+
+        try:
+            attacker_index = int(target_choice)
+        except ValueError:
+            print("Please enter a valid attacker index.")
+            continue
+
+        if (
+            attacker_index < 0
+            or attacker_index >= len(latest_attackers)
+        ):
+            print("That attacker index is invalid.")
+            continue
+
+        assignments.append({
+            "creature_id": legal_blockers[blocker_index],
+            "blocking_id": latest_attackers[attacker_index]
+        })
+
+        used_blockers.add(blocker_index)
+
+        print("[CLIENT] Block assignment added.")
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -563,6 +705,7 @@ def start_client(player_id, deck_list, verbose=False):
             while (
                 not priority_grant_received.is_set()
                 and not attackers_request_received.is_set()
+                and not blockers_request_received.is_set()
             ):
                 time.sleep(0.05)
 
@@ -590,6 +733,34 @@ def start_client(player_id, deck_list, verbose=False):
                 print(
                     f"[CLIENT] Declared "
                     f"{len(attackers)} attacker(s)."
+                )
+
+                continue
+
+            if blockers_request_received.is_set():
+                blockers_request_received.clear()
+
+                blockers = prompt_blockers(
+                    player_id,
+                    ui
+                )
+
+                blockers_pdu = {
+                    "type": "DECLARE_BLOCKERS",
+                    "seq_num": latest_phase_seq,
+                    "blockers": blockers
+                }
+
+                send_pdu(
+                    client_sock,
+                    blockers_pdu,
+                    VERBOSE,
+                    "DECLARE_BLOCKERS to Server"
+                )
+
+                print(
+                    f"[CLIENT] Declared "
+                    f"{len(blockers)} blocker(s)."
                 )
 
                 continue
