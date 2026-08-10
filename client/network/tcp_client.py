@@ -25,6 +25,7 @@ latest_hand = []
 latest_active_player = None
 latest_battlefield = {}
 latest_life_totals = {}
+latest_game_state = {}
 latest_phase_seq = 0
 attackers_request_received = threading.Event()
 blockers_request_received = threading.Event()
@@ -68,6 +69,7 @@ def listen_for_messages(sock, ui=None):
     global latest_priority_seq, latest_phase
     global latest_hand, latest_active_player
     global latest_battlefield, latest_life_totals
+    global latest_game_state
     global latest_phase_seq
     global latest_attackers
     global latest_combat_blockers
@@ -99,6 +101,7 @@ def listen_for_messages(sock, ui=None):
 
                 elif pdu_type == "GAME_STATE_UPDATE":
                     state = pdu.get("state", {})
+                    latest_game_state = state
                     phase = state.get("phase")
 
                     latest_phase = phase or latest_phase
@@ -237,6 +240,38 @@ def listen_for_messages(sock, ui=None):
                         print("\n[CLIENT] You have priority.")
                         priority_grant_received.set()
 
+                elif pdu_type == "STACK_PUSH":
+                    if latest_game_state:
+                        stack = latest_game_state.setdefault("stack", [])
+
+                        stack.append({
+                            "stack_item_id": pdu.get("stack_item_id"),
+                            "item_type": pdu.get("item_type"),
+                            "source": pdu.get("source"),
+                            "targets": pdu.get("targets", []),
+                            "controller": pdu.get("controller")
+                        })
+
+                        if ui:
+                            ui.render({
+                                "state": latest_game_state
+                            })
+
+                elif pdu_type == "STACK_RESOLVE":
+                    if latest_game_state:
+                        resolved_id = pdu.get("stack_item_id")
+
+                        latest_game_state["stack"] = [
+                            item
+                            for item in latest_game_state.get("stack", [])
+                            if item.get("stack_item_id") != resolved_id
+                        ]
+
+                        if ui:
+                            ui.render({
+                                "state": latest_game_state
+                            })
+
                 elif pdu_type == "GAME_OVER":
                     winner_id = pdu.get("winner_id")
                     loser_id = pdu.get("loser_id")
@@ -259,9 +294,19 @@ def listen_for_messages(sock, ui=None):
                     game_over_received.set()
 
                 elif pdu_type == "ERROR":
+                    error_message = (
+                        f"{pdu.get('code')}: "
+                        f"{pdu.get('message')}"
+                    )
+
+                    if ui:
+                        ui.set_status(
+                            f"ERROR - {error_message}"
+                        )
+
                     print(
                         f"\n[CLIENT ERROR] "
-                        f"{pdu.get('code')}: {pdu.get('message')}"
+                        f"{error_message}"
                     )
 
                 else:
@@ -945,6 +990,10 @@ def start_client(player_id, deck_list, verbose=False):
                     "DECLARE_ATTACKERS to Server"
                 )
 
+                ui.set_status(
+                    f"Declared {len(attackers)} attacker(s)."
+                )
+
                 print(
                     f"[CLIENT] Declared "
                     f"{len(attackers)} attacker(s)."
@@ -971,6 +1020,10 @@ def start_client(player_id, deck_list, verbose=False):
                     blockers_pdu,
                     VERBOSE,
                     "DECLARE_BLOCKERS to Server"
+                )
+
+                ui.set_status(
+                    f"Declared {len(attackers)} attacker(s)."
                 )
 
                 print(
@@ -1000,6 +1053,11 @@ def start_client(player_id, deck_list, verbose=False):
                         "ASSIGN_DAMAGE_ORDER to Server"
                     )
 
+                    ui.set_status(
+                        f"Damage order assigned for "
+                        f"{ui.get_card_name(assignment['attacker_id'])}."
+                    )
+
                     print(
                         f"[CLIENT] Damage order assigned for "
                         f"{ui.get_card_name(assignment['attacker_id'])}."
@@ -1026,6 +1084,10 @@ def start_client(player_id, deck_list, verbose=False):
                     discard_pdu,
                     VERBOSE,
                     "DISCARD to Server"
+                )
+
+                ui.set_status(
+                    f"Discarded {len(card_ids)} card(s)."
                 )
 
                 print(
@@ -1124,6 +1186,10 @@ def start_client(player_id, deck_list, verbose=False):
                         land_pdu,
                         VERBOSE,
                         "PLAY_LAND to Server"
+                    )
+
+                    ui.set_status(
+                        f"Requested to play {ui.get_card_name(card_id)}."
                     )
 
                     print(
@@ -1239,6 +1305,10 @@ def start_client(player_id, deck_list, verbose=False):
                         cast_pdu,
                         VERBOSE,
                         "CAST_SPELL to Server"
+                    )
+
+                    ui.set_status(
+                        f"Requested to cast {ui.get_card_name(card_id)}."
                     )
 
                     print(

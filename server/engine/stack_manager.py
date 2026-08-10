@@ -115,6 +115,14 @@ class StackManager:
             mana_paid=mana_payment,
         )
         self._push(item)
+
+        # Broadcast the authoritative state after the spell
+        # leaves the hand, mana is paid, and it enters the stack.
+        broadcast_personalized_state(
+            self.state,
+            self.send_fn
+        )
+
         # RFC 8.1 rule 3: caster retains priority.
         self.reopen_priority_for_actor(player_id)
 

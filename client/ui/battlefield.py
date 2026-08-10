@@ -4,6 +4,8 @@ import json
 class BattlefieldUI:
     def __init__(self, player_id):
         self.player_id = player_id
+        self.status_message = None
+
         # Load the card catalog
         with open("shared/data/card_catalog.json", "r") as f:
             self.catalog = json.load(f)
@@ -13,6 +15,10 @@ class BattlefieldUI:
         base_id = "_".join(card_id.split("_")[:-1])
         card = self.catalog.get(card_id) or self.catalog.get(base_id)
         return card.get("name", card_id) if card else card_id
+
+    def set_status(self, message):
+        """Store an important message so it survives screen redraws."""
+        self.status_message = message
 
     def clear_screen(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -62,6 +68,29 @@ class BattlefieldUI:
                 print(f"  -> {self.get_card_name(item['source'])} (Target: {item.get('targets', [])})")
             print("-" * 60)
 
+        # --- GRAVEYARD ZONE ---
+        graveyard = state.get("graveyard", {})
+
+        print("[ GRAVEYARDS ]")
+
+        opponent_graveyard = graveyard.get(opponent_id, [])
+        print(f"{opponent_id}:")
+        if opponent_graveyard:
+            for card_id in opponent_graveyard:
+                print(f"  - {self.get_card_name(card_id)}")
+        else:
+            print("  - Empty")
+
+        my_graveyard = graveyard.get(self.player_id, [])
+        print(f"{self.player_id}:")
+        if my_graveyard:
+            for card_id in my_graveyard:
+                print(f"  - {self.get_card_name(card_id)}")
+        else:
+            print("  - Empty")
+
+        print("-" * 60)
+
         # --- PLAYER ZONE ---
         my_life = life_totals.get(self.player_id, 20)
         my_deck = state.get("library_counts", {}).get(self.player_id, 0)
@@ -73,7 +102,6 @@ class BattlefieldUI:
         for i, card_id in enumerate(my_hand):
             print(f"  [{i}] {self.get_card_name(card_id)} ({card_id})")
         print("="*60)
-        
-        priority = state.get("priority_holder")
-        if priority == self.player_id:
-            print("\n*** YOU HAVE PRIORITY ***")
+
+        if self.status_message:
+            print(f"\n[ STATUS ] {self.status_message}")
