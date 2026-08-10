@@ -31,6 +31,7 @@ blockers_request_received = threading.Event()
 latest_attackers = []
 latest_cleanup_seq = 0
 discard_request_received = threading.Event()
+game_over_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -223,15 +224,40 @@ def listen_for_messages(sock, ui=None):
                         print("\n[CLIENT] You have priority.")
                         priority_grant_received.set()
 
+                elif pdu_type == "GAME_OVER":
+                    winner_id = pdu.get("winner_id")
+                    loser_id = pdu.get("loser_id")
+                    reason = pdu.get("reason")
+
+                    print("\n" + "=" * 45)
+                    print("[CLIENT] GAME OVER")
+                    print(f"Winner: {winner_id}")
+                    print(f"Loser: {loser_id}")
+                    print(f"Reason: {reason}")
+
+                    if ui:
+                        if winner_id == ui.player_id:
+                            print("Result: YOU WIN")
+                        elif loser_id == ui.player_id:
+                            print("Result: YOU LOSE")
+
+                    print("=" * 45)
+
+                    game_over_received.set()
+
                 elif pdu_type == "ERROR":
-                    print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
+                    print(
+                        f"\n[CLIENT ERROR] "
+                        f"{pdu.get('code')}: {pdu.get('message')}"
+                    )
 
                 else:
                     print(f"\n[CLIENT] Received {pdu_type} PDU")
                 
     except (ConnectionResetError, json.JSONDecodeError, struct.error, OSError):
-        print("\n[CLIENT] Connection closed or network error occurred.")
-        sys.exit(1)
+        if not game_over_received.is_set():
+            print("\n[CLIENT] Connection closed or network error occurred.")
+        return
 
 def main():
     global VERBOSE
@@ -773,8 +799,12 @@ def start_client(player_id, deck_list, verbose=False):
                 and not attackers_request_received.is_set()
                 and not blockers_request_received.is_set()
                 and not discard_request_received.is_set()
+                and not game_over_received.is_set()
             ):
                 time.sleep(0.05)
+
+            if game_over_received.is_set():
+                break
 
             if attackers_request_received.is_set():
                 attackers_request_received.clear()
@@ -873,12 +903,31 @@ def start_client(player_id, deck_list, verbose=False):
 
                 if can_play_land:
                     action = input(
-                        "\nChoose action [pass/land/cast]: "
+                        "\nChoose action [pass/land/cast/concede]: "
                     ).strip().lower()
                 else:
                     action = input(
-                        "\nType 'pass' to pass priority: "
+                        "\nChoose action [pass/concede]: "
                     ).strip().lower()
+
+                if action == "concede":
+                    concede_pdu = {
+                        "type": "CONCEDE",
+                        "seq_num": latest_priority_seq,
+                        "player_id": player_id
+                    }
+
+                    send_pdu(
+                        client_sock,
+                        concede_pdu,
+                        VERBOSE,
+                        "CONCEDE to Server"
+                    )
+
+                    print("[CLIENT] Concession sent. Waiting for GAME_OVER...")
+
+                    game_over_received.wait()
+                    break
 
                 if action == "pass":
                     pass_pdu = {
@@ -1029,7 +1078,16 @@ def start_client(player_id, deck_list, verbose=False):
         pass
     finally:
         print("\n[CLIENT] Closing connection.")
+
+        try:
+            client_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
         client_sock.close()
+
+        if listener_thread.is_alive():
+            listener_thread.join(timeout=1)
 
 if __name__ == "__main__":
     main()
