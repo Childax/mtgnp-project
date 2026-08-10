@@ -1111,7 +1111,8 @@ def start_client(player_id, deck_list, verbose=False):
                 has_supported_instant = any(
                     card_id in {
                         "lightning_bolt_001",
-                        "shock_001"
+                        "shock_001",
+                        "giant_growth_001"
                     }
                     for card_id in latest_hand
                 )
@@ -1213,7 +1214,8 @@ def start_client(player_id, deck_list, verbose=False):
                                 card_type == "creature"
                                 or possible_card_id in {
                                     "lightning_bolt_001",
-                                    "shock_001"
+                                    "shock_001",
+                                    "giant_growth_001"
                                 }
                             ):
                                 cast_options.append(
@@ -1223,7 +1225,8 @@ def start_client(player_id, deck_list, verbose=False):
                         else:
                             if possible_card_id in {
                                 "lightning_bolt_001",
-                                "shock_001"
+                                "shock_001",
+                                "giant_growth_001"
                             }:
                                 cast_options.append(
                                     (index, possible_card_id)
@@ -1286,6 +1289,17 @@ def start_client(player_id, deck_list, verbose=False):
                         "shock_001"
                     }:
                         target = prompt_spell_target(ui)
+
+                        if target is None:
+                            continue
+
+                        targets = [target]
+
+                    elif card_id == "giant_growth_001":
+                        target = prompt_spell_target(
+                            ui,
+                            creature_only=True
+                        )
 
                         if target is None:
                             continue
