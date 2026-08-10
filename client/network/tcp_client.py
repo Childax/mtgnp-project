@@ -688,38 +688,10 @@ def prompt_cleanup_discard(hand, ui):
 
         return [hand[index] for index in indexes]
 
-def start_client(player_id, deck_list, verbose=False):
-    """Connects the configured player and sends PLAYER_READY."""
-    global VERBOSE, last_pong_time
+def run_lobby_and_mulligan(client_sock, player_id, deck_list):
+    """Send PLAYER_READY and complete the mulligan phase."""
 
-    VERBOSE = verbose
-
-    client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    ui = BattlefieldUI(player_id)
-
-    try:
-        client_sock.connect((HOST, PORT))
-        print(f"[CLIENT] Connected to Game Server at {HOST}:{PORT}")
-    except ConnectionRefusedError:
-        print("[CLIENT] Connection refused. Make sure the server is running.")
-        return
-
-    last_pong_time = time.time()
-
-    heartbeat_thread = threading.Thread(
-        target=heartbeat_loop,
-        args=(client_sock,),
-        daemon=True
-    )
-    heartbeat_thread.start()
-
-    listener_thread = threading.Thread(
-        target=listen_for_messages,
-        args=(client_sock, ui),
-        daemon=True
-    )
-    listener_thread.start()
+    mulligan_state_received.clear()
 
     ready_pdu = {
         "type": "PLAYER_READY",
@@ -736,7 +708,6 @@ def start_client(player_id, deck_list, verbose=False):
     )
 
     print(f"[CLIENT] Sent PLAYER_READY for {player_id}.")
-
     print("[CLIENT] Waiting for opening hand...")
 
     while True:
@@ -744,7 +715,9 @@ def start_client(player_id, deck_list, verbose=False):
         mulligan_state_received.clear()
 
         while True:
-            choice = input("\nKeep or mulligan? [K/M]: ").strip().upper()
+            choice = input(
+                "\nKeep or mulligan? [K/M]: "
+            ).strip().upper()
 
             if choice in {"K", "M"}:
                 break
@@ -792,6 +765,45 @@ def start_client(player_id, deck_list, verbose=False):
         print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
         break
 
+def start_client(player_id, deck_list, verbose=False):
+    """Connects the configured player and sends PLAYER_READY."""
+    global VERBOSE, last_pong_time
+
+    VERBOSE = verbose
+
+    client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    ui = BattlefieldUI(player_id)
+
+    try:
+        client_sock.connect((HOST, PORT))
+        print(f"[CLIENT] Connected to Game Server at {HOST}:{PORT}")
+    except ConnectionRefusedError:
+        print("[CLIENT] Connection refused. Make sure the server is running.")
+        return
+
+    last_pong_time = time.time()
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        args=(client_sock,),
+        daemon=True
+    )
+    heartbeat_thread.start()
+
+    listener_thread = threading.Thread(
+        target=listen_for_messages,
+        args=(client_sock, ui),
+        daemon=True
+    )
+    listener_thread.start()
+
+    run_lobby_and_mulligan(
+        client_sock,
+        player_id,
+        deck_list
+    )
+
     try:
         while True:
             while (
@@ -804,7 +816,41 @@ def start_client(player_id, deck_list, verbose=False):
                 time.sleep(0.05)
 
             if game_over_received.is_set():
-                break
+
+                priority_grant_received.clear()
+                attackers_request_received.clear()
+                blockers_request_received.clear()
+                discard_request_received.clear()
+                mulligan_state_received.clear()
+                latest_attackers.clear()
+
+                while True:
+                    play_again = input(
+                        "\nPlay another game? [Y/N]: "
+                    ).strip().upper()
+
+                    if play_again in {"Y", "N"}:
+                        break
+
+                    print("Please enter Y or N.")
+
+                if play_again == "N":
+                    break
+
+                game_over_received.clear()
+
+                print(
+                    "[CLIENT] Returning to lobby "
+                    "on the same connection..."
+                )
+
+                run_lobby_and_mulligan(
+                    client_sock,
+                    player_id,
+                    deck_list
+                )
+
+                continue
 
             if attackers_request_received.is_set():
                 attackers_request_received.clear()
