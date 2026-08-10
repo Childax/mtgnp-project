@@ -236,7 +236,6 @@ class CombatManager:
         """RFC 9.6. Only creatures with first/double strike deal damage here."""
         events = self._compute_damage(first_strike_pass=True)
         self._apply_damage_and_broadcast(events, is_final_combat_step=False)
-        self.run_sba_fn()
         self.open_priority_fn()
 
     def run_combat_damage(self) -> None:
@@ -244,7 +243,6 @@ class CombatManager:
         since they already dealt damage in the first strike step)."""
         events = self._compute_damage(first_strike_pass=False)
         self._apply_damage_and_broadcast(events, is_final_combat_step=True)
-        self.run_sba_fn()
         self.advance_to_fn("END_OF_COMBAT")
 
     def _compute_damage(self, first_strike_pass: bool) -> list[dict]:
@@ -282,17 +280,36 @@ class CombatManager:
             order = self.damage_order.get(attacker_id, blocker_ids)
             remaining = attacker.power
             defender = self.state.players[target]
+
+            live_blockers = []
+
             for bid in order:
+                blocker = defender.find_permanent(bid)
+
+                if blocker is not None and not blocker.is_dead():
+                    live_blockers.append((bid, blocker))
+
+            for index, (bid, blocker) in enumerate(live_blockers):
                 if remaining <= 0:
                     break
-                blocker = defender.find_permanent(bid)
-                if blocker is None or blocker.is_dead():
-                    continue
-                lethal_needed = max(blocker.toughness - blocker.damage, 0)
-                assign = min(remaining, lethal_needed) if lethal_needed > 0 else remaining
-                if assign <= 0:
+
+                is_last_blocker = index == len(live_blockers) - 1
+
+                if is_last_blocker:
                     assign = remaining
-                events.append({"source": attacker_id, "target": bid, "amount": assign})
+                else:
+                    lethal_needed = max(
+                        blocker.toughness - blocker.damage,
+                        0
+                    )
+                    assign = min(remaining, lethal_needed)
+
+                events.append({
+                    "source": attacker_id,
+                    "target": bid,
+                    "amount": assign
+                })
+
                 remaining -= assign
 
             # Blockers deal damage back to the attacker simultaneously.
@@ -323,6 +340,13 @@ class CombatManager:
 
         creatures_died_after = self._dead_creature_ids()
         newly_died = list(creatures_died_after - creatures_died_before)
+
+        # Apply state-based actions before broadcasting the new state.
+        # This moves creatures with lethal damage to the graveyard.
+        self.run_sba_fn()
+
+        if self.state.game_over:
+            return
 
         if is_final_combat_step or events:
             pdu = build_combat_damage_result(
