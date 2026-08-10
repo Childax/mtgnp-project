@@ -23,6 +23,8 @@ priority_grant_received = threading.Event()
 latest_phase = "LOBBY"
 latest_hand = []
 latest_active_player = None
+latest_battlefield = {}
+latest_life_totals = {}
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -56,6 +58,7 @@ def listen_for_messages(sock, ui=None):
     global latest_mulligan_hand, latest_mulligan_count
     global latest_priority_seq, latest_phase
     global latest_hand, latest_active_player
+    global latest_battlefield, latest_life_totals
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -95,6 +98,16 @@ def listen_for_messages(sock, ui=None):
                         latest_hand = list(
                             state.get("hand", {}).get(ui.player_id, [])
                         )
+
+                    latest_battlefield = state.get(
+                        "battlefield",
+                        latest_battlefield
+                    )
+
+                    latest_life_totals = state.get(
+                        "life_totals",
+                        latest_life_totals
+                    )
 
                     if phase == "LOBBY":
                         players_ready = state.get("players_ready", 0)
@@ -302,6 +315,59 @@ def prompt_creature_to_cast(hand, ui):
 
         print("That index is not a creature card.")
 
+def prompt_spell_target(ui, creature_only=False):
+    """Ask the player to select a legal target."""
+    options = []
+
+    if not creature_only:
+        for player_id in latest_life_totals:
+            options.append(
+                (player_id, f"Player: {player_id}")
+            )
+
+    for player_id, permanents in latest_battlefield.items():
+        for permanent in permanents:
+            card_id = permanent.get("id")
+
+            card_info = ui.catalog.get(card_id, {})
+
+            if str(card_info.get("type", "")).lower() == "creature":
+                options.append(
+                    (
+                        card_id,
+                        f"{ui.get_card_name(card_id)} "
+                        f"({player_id})"
+                    )
+                )
+
+    if not options:
+        print("[CLIENT] No valid targets are available.")
+        return None
+
+    print("\nAvailable targets:")
+
+    for index, (_, description) in enumerate(options):
+        print(f"  [{index}] {description}")
+
+    while True:
+        choice = input(
+            "Choose target index (or type 'cancel'): "
+        ).strip().lower()
+
+        if choice == "cancel":
+            return None
+
+        try:
+            index = int(choice)
+        except ValueError:
+            print("Please enter a valid target index.")
+            continue
+
+        if 0 <= index < len(options):
+            return options[index][0]
+
+        print("That target index is invalid.")
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -474,10 +540,59 @@ def start_client(player_id, deck_list, verbose=False):
                     break
 
                 if action == "cast" and can_play_land:
-                    card_id = prompt_creature_to_cast(
-                        latest_hand,
-                        ui
-                    )
+                    cast_options = []
+
+                    for index, possible_card_id in enumerate(latest_hand):
+                        card_info = ui.catalog.get(possible_card_id, {})
+                        card_type = str(card_info.get("type", "")).lower()
+
+                        if card_type == "creature" or possible_card_id in {
+                            "lightning_bolt_001",
+                            "shock_001"
+                        }:
+                            cast_options.append((index, possible_card_id))
+
+                    if not cast_options:
+                        print("[CLIENT] You have no supported spells to cast.")
+                        continue
+
+                    print("\nSpells in your hand:")
+
+                    for index, possible_card_id in cast_options:
+                        print(
+                            f"  [{index}] {ui.get_card_name(possible_card_id)} "
+                            f"({possible_card_id})"
+                        )
+
+                    while True:
+                        choice = input(
+                            "Choose the hand index of the spell to cast "
+                            "(or type 'cancel'): "
+                        ).strip().lower()
+
+                        if choice == "cancel":
+                            card_id = None
+                            break
+
+                        try:
+                            selected_index = int(choice)
+                        except ValueError:
+                            print("Please enter a valid card index.")
+                            continue
+
+                        card_id = next(
+                            (
+                                possible_card_id
+                                for index, possible_card_id in cast_options
+                                if index == selected_index
+                            ),
+                            None
+                        )
+
+                        if card_id:
+                            break
+
+                        print("That index is not a supported spell.")
 
                     if card_id is None:
                         continue
@@ -487,11 +602,24 @@ def start_client(player_id, deck_list, verbose=False):
                         card_info.get("mana_cost", {})
                     )
 
+                    targets = []
+
+                    if card_id in {
+                        "lightning_bolt_001",
+                        "shock_001"
+                    }:
+                        target = prompt_spell_target(ui)
+
+                        if target is None:
+                            continue
+
+                        targets = [target]
+
                     cast_pdu = {
                         "type": "CAST_SPELL",
                         "seq_num": latest_priority_seq,
                         "card_id": card_id,
-                        "targets": [],
+                        "targets": targets,
                         "mana_payment": mana_payment
                     }
 
