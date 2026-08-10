@@ -18,6 +18,8 @@ latest_server_seq = 0
 latest_mulligan_hand = []
 latest_mulligan_count = 0
 mulligan_state_received = threading.Event()
+latest_priority_seq = 0
+priority_grant_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -49,6 +51,7 @@ def heartbeat_loop(sock):
 def listen_for_messages(sock, ui=None):
     global last_pong_time, latest_server_seq
     global latest_mulligan_hand, latest_mulligan_count
+    global latest_priority_seq
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -102,6 +105,12 @@ def listen_for_messages(sock, ui=None):
                                 )
 
                             mulligan_state_received.set()
+                elif pdu_type == "PRIORITY_GRANT":
+                    latest_priority_seq = pdu.get("seq_num", 0)
+
+                    if ui and pdu.get("player_id") == ui.player_id:
+                        print("\n[CLIENT] You have priority.")
+                        priority_grant_received.set()
 
                 elif pdu_type == "ERROR":
                     print(f"\n[CLIENT ERROR] {pdu.get('code')}: {pdu.get('message')}")
@@ -285,7 +294,30 @@ def start_client(player_id, deck_list, verbose=False):
 
     try:
         while True:
-            time.sleep(1)
+            priority_grant_received.wait()
+            priority_grant_received.clear()
+
+            while True:
+                action = input("\nType 'pass' to pass priority: ").strip().lower()
+
+                if action == "pass":
+                    break
+
+                print("For now, the available action is: pass")
+
+            pass_pdu = {
+                "type": "PRIORITY_PASS",
+                "seq_num": latest_priority_seq
+            }
+
+            send_pdu(
+                client_sock,
+                pass_pdu,
+                VERBOSE,
+                "PRIORITY_PASS to Server"
+            )
+
+            print("[CLIENT] Priority passed.")
     except KeyboardInterrupt:
         pass
     finally:
