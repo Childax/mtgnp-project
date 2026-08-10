@@ -366,12 +366,32 @@ def handle_client(conn, addr, player_id):
     except (ConnectionResetError, OSError):
         print(f"\n[SERVER] Network drop detected for Player {player_id}.")
     finally:
-        print(f"[SERVER] Player {player_id} disconnected. Starting {RECONNECT_TIMEOUT}s reconnect timer...")
         if player_id in sessions:
             sessions[player_id]["connected"] = False
-            timer = threading.Timer(RECONNECT_TIMEOUT, trigger_forfeit, args=[player_id])
-            sessions[player_id]["timer"] = timer
-            timer.start()
+
+            if current_game_state is not None:
+                print(
+                    f"[SERVER] Player {player_id} disconnected. "
+                    f"Starting {RECONNECT_TIMEOUT}s reconnect timer..."
+                )
+
+                timer = threading.Timer(
+                    RECONNECT_TIMEOUT,
+                    trigger_forfeit,
+                    args=[player_id]
+                )
+
+                sessions[player_id]["timer"] = timer
+                timer.start()
+
+            else:
+                print(
+                    f"[SERVER] Player {player_id} disconnected "
+                    "outside an active game."
+                )
+
+                sessions[player_id]["timer"] = None
+
         conn.close()
 
 def main():
