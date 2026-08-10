@@ -259,6 +259,49 @@ def prompt_land_to_play(hand, ui):
 
         print("That index is not a land card.")
 
+def prompt_creature_to_cast(hand, ui):
+    """Ask the player which creature spell to cast."""
+    creature_options = []
+
+    for index, card_id in enumerate(hand):
+        card_info = ui.catalog.get(card_id, {})
+
+        if str(card_info.get("type", "")).lower() == "creature":
+            creature_options.append((index, card_id))
+
+    if not creature_options:
+        print("[CLIENT] You have no creature cards in your hand.")
+        return None
+
+    print("\nCreature cards in your hand:")
+
+    for index, card_id in creature_options:
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    while True:
+        choice = input(
+            "Choose the hand index of the creature to cast "
+            "(or type 'cancel'): "
+        ).strip().lower()
+
+        if choice == "cancel":
+            return None
+
+        try:
+            index = int(choice)
+        except ValueError:
+            print("Please enter a valid card index.")
+            continue
+
+        for creature_index, card_id in creature_options:
+            if index == creature_index:
+                return card_id
+
+        print("That index is not a creature card.")
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -379,7 +422,7 @@ def start_client(player_id, deck_list, verbose=False):
 
                 if can_play_land:
                     action = input(
-                        "\nChoose action [pass/land]: "
+                        "\nChoose action [pass/land/cast]: "
                     ).strip().lower()
                 else:
                     action = input(
@@ -430,8 +473,43 @@ def start_client(player_id, deck_list, verbose=False):
                     )
                     break
 
+                if action == "cast" and can_play_land:
+                    card_id = prompt_creature_to_cast(
+                        latest_hand,
+                        ui
+                    )
+
+                    if card_id is None:
+                        continue
+
+                    card_info = ui.catalog.get(card_id, {})
+                    mana_payment = dict(
+                        card_info.get("mana_cost", {})
+                    )
+
+                    cast_pdu = {
+                        "type": "CAST_SPELL",
+                        "seq_num": latest_priority_seq,
+                        "card_id": card_id,
+                        "targets": [],
+                        "mana_payment": mana_payment
+                    }
+
+                    send_pdu(
+                        client_sock,
+                        cast_pdu,
+                        VERBOSE,
+                        "CAST_SPELL to Server"
+                    )
+
+                    print(
+                        f"[CLIENT] Requested to cast "
+                        f"{ui.get_card_name(card_id)}."
+                    )
+                    break
+
                 if can_play_land:
-                    print("Available actions: pass, land")
+                    print("Available actions: pass, land, cast")
                 else:
                     print("Available action: pass")
     except KeyboardInterrupt:
