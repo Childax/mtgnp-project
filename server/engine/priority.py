@@ -84,6 +84,25 @@ class PriorityManager:
         pdu = build_priority_grant(seq, player_id, self.time_limit_ms)
         self.send_fn(player_id, pdu)
 
+    def reissue_current_priority(self, player_id: str) -> None:
+        """
+        Re-send the current PRIORITY_GRANT without creating
+        a new priority token.
+        """
+        if (
+            player_id != self.state.priority_holder
+            or self._current_priority_seq is None
+        ):
+            return
+
+        pdu = build_priority_grant(
+            self._current_priority_seq,
+            player_id,
+            self.time_limit_ms
+        )
+
+        self.send_fn(player_id, pdu)
+
     def reopen_after_stack_action(self, actor_id: str) -> None:
         """
         RFC 8.1 rule 3: when a player casts a spell or activates an
@@ -146,12 +165,7 @@ class PriorityManager:
         self.send_fn(player_id, error_pdu)
 
         if player_id == self.state.priority_holder:
-            # Re-issue with the SAME token (do not advance the counter's
-            # "current" pointer) -- per RFC 5.4 example in the spec text,
-            # the server re-sends PRIORITY_GRANT with a fresh seq_num but
-            # the player must still act on it; simplest safe behavior is
-            # to just re-grant.
-            self._grant(player_id)
+            self.reissue_current_priority(player_id)
 
     # -- Passing (PRI-02) --------------------------------------------------
 

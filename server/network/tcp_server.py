@@ -114,6 +114,7 @@ def start_in_game_engine():
         on_game_over=handle_engine_game_over,
         reopen_priority_for_actor=turn_manager.priority.reopen_after_stack_action,
         reopen_priority_after_resolution=turn_manager.priority.reopen_after_resolution,
+        reissue_priority_fn=turn_manager.priority.reissue_current_priority,
         register_cleanup_hook_fn=turn_manager.register_cleanup_hook,
     )
 

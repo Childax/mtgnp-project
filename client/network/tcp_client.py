@@ -1046,10 +1046,24 @@ def start_client(player_id, deck_list, verbose=False):
                     }
                 )
 
+                has_supported_instant = any(
+                    card_id in {
+                        "lightning_bolt_001",
+                        "shock_001"
+                    }
+                    for card_id in latest_hand
+                )
+
                 if can_play_land:
                     action = input(
                         "\nChoose action [pass/land/cast/concede]: "
                     ).strip().lower()
+
+                elif has_supported_instant:
+                    action = input(
+                        "\nChoose action [pass/cast/concede]: "
+                    ).strip().lower()
+
                 else:
                     action = input(
                         "\nChoose action [pass/concede]: "
@@ -1118,18 +1132,36 @@ def start_client(player_id, deck_list, verbose=False):
                     )
                     break
 
-                if action == "cast" and can_play_land:
+                if action == "cast" and (
+                    can_play_land
+                    or has_supported_instant
+                ):
                     cast_options = []
 
                     for index, possible_card_id in enumerate(latest_hand):
                         card_info = ui.catalog.get(possible_card_id, {})
                         card_type = str(card_info.get("type", "")).lower()
 
-                        if card_type == "creature" or possible_card_id in {
-                            "lightning_bolt_001",
-                            "shock_001"
-                        }:
-                            cast_options.append((index, possible_card_id))
+                        if can_play_land:
+                            if (
+                                card_type == "creature"
+                                or possible_card_id in {
+                                    "lightning_bolt_001",
+                                    "shock_001"
+                                }
+                            ):
+                                cast_options.append(
+                                    (index, possible_card_id)
+                                )
+
+                        else:
+                            if possible_card_id in {
+                                "lightning_bolt_001",
+                                "shock_001"
+                            }:
+                                cast_options.append(
+                                    (index, possible_card_id)
+                                )
 
                     if not cast_options:
                         print("[CLIENT] You have no supported spells to cast.")

@@ -38,6 +38,7 @@ class StackManager:
                  on_game_over: Callable[[str, str, str], None],
                  reopen_priority_for_actor: Callable[[str], None],
                  reopen_priority_after_resolution: Callable[[], None],
+                 reissue_priority_fn: Callable[[str], None],
                  card_catalog: Optional[dict] = None,
                  register_cleanup_hook_fn: Optional[Callable[[Callable[[], None]], None]] = None):
         self.state = state
@@ -46,6 +47,7 @@ class StackManager:
         self.on_game_over = on_game_over
         self.reopen_priority_for_actor = reopen_priority_for_actor
         self.reopen_priority_after_resolution = reopen_priority_after_resolution
+        self.reissue_priority_fn = reissue_priority_fn
         # register_cleanup_hook_fn: TurnManager.register_cleanup_hook.
         # Used so temporary combat-trick effects (e.g. Giant Growth's
         # +3/+3) revert automatically at the next Cleanup Step instead
@@ -76,7 +78,8 @@ class StackManager:
             return
 
         card_info = self.card_catalog.get(card_id, {})
-        is_instant = card_info.get("type") == "INSTANT"
+        card_type = str(card_info.get("type", "")).upper()
+        is_instant = card_type == "INSTANT"
 
         # 2. Timing check (RFC 7.5): Non-instants require Main Phase, empty stack, Active Player
         if not is_instant:
@@ -214,17 +217,51 @@ class StackManager:
 
         if not self._targets_still_legal(item):
             pdu = build_stack_resolve(
-                self.state.next_seq(), item.stack_item_id, ResolveResult.FIZZLE, [],
+                self.state.next_seq(),
+                item.stack_item_id,
+                ResolveResult.FIZZLE,
+                [],
             )
             self.broadcast_fn(pdu)
+
         else:
             state_changes = self._apply_effect(item)
+
             pdu = build_stack_resolve(
-                self.state.next_seq(), item.stack_item_id, ResolveResult.RESOLVED,
+                self.state.next_seq(),
+                item.stack_item_id,
+                ResolveResult.RESOLVED,
                 state_changes,
             )
+
             self.broadcast_fn(pdu)
-            broadcast_personalized_state(self.state, self.send_fn)
+
+        # Resolved or fizzled Instant/Sorcery spells go to
+        # their controller's graveyard after leaving the stack.
+        if item.item_type == ItemType.SPELL:
+            card_info = self.card_catalog.get(
+                item.source_id,
+                {}
+            )
+
+            card_type = str(
+                card_info.get("type", "")
+            ).upper()
+
+            if card_type in {"INSTANT", "SORCERY"}:
+                controller = self.state.players[
+                    item.controller_id
+                ]
+
+                if item.source_id not in controller.graveyard:
+                    controller.graveyard.append(
+                        item.source_id
+                    )
+
+        broadcast_personalized_state(
+            self.state,
+            self.send_fn
+        )
 
         self.run_state_based_actions()
         if not self.state.game_over:
@@ -456,7 +493,18 @@ class StackManager:
                     changed = True
 
     def _reject(self, player_id: str, pdu: dict, code: str, message: str) -> None:
-        self.send_fn(player_id, build_error(
-            self.state.next_seq(), code, message,
-            rejected_action={"type": pdu.get("type"), "seq_num": pdu.get("seq_num")},
-        ))
+        self.send_fn(
+            player_id,
+            build_error(
+                self.state.next_seq(),
+                code,
+                message,
+                rejected_action={
+                    "type": pdu.get("type"),
+                    "seq_num": pdu.get("seq_num")
+                },
+            )
+        )
+
+        if player_id == self.state.priority_holder:
+            self.reissue_priority_fn(player_id)
