@@ -29,6 +29,8 @@ latest_phase_seq = 0
 attackers_request_received = threading.Event()
 blockers_request_received = threading.Event()
 latest_attackers = []
+latest_cleanup_seq = 0
+discard_request_received = threading.Event()
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -65,6 +67,7 @@ def listen_for_messages(sock, ui=None):
     global latest_battlefield, latest_life_totals
     global latest_phase_seq
     global latest_attackers
+    global latest_cleanup_seq
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -104,6 +107,15 @@ def listen_for_messages(sock, ui=None):
                         latest_hand = list(
                             state.get("hand", {}).get(ui.player_id, [])
                         )
+
+                    if (
+                        ui
+                        and phase == "CLEANUP"
+                        and latest_active_player == ui.player_id
+                        and len(latest_hand) > 7
+                    ):
+                        latest_cleanup_seq = pdu.get("seq_num", 0)
+                        discard_request_received.set()
 
                     previous_battlefield = latest_battlefield
 
@@ -596,6 +608,60 @@ def prompt_blockers(player_id, ui):
 
         print("[CLIENT] Block assignment added.")
 
+def prompt_cleanup_discard(hand, ui):
+    """Ask the active player which excess cards to discard."""
+    discard_count = len(hand) - 7
+
+    if discard_count <= 0:
+        return []
+
+    print(
+        f"\n[CLIENT] Cleanup: you must discard "
+        f"{discard_count} card(s)."
+    )
+
+    print("\nYour hand:")
+
+    for index, card_id in enumerate(hand):
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    while True:
+        choice = input(
+            f"Choose exactly {discard_count} card index(es) "
+            "to discard, separated by spaces: "
+        ).strip()
+
+        try:
+            indexes = [
+                int(value)
+                for value in choice.split()
+            ]
+        except ValueError:
+            print("Please enter card indexes using numbers only.")
+            continue
+
+        if len(indexes) != discard_count:
+            print(
+                f"Choose exactly {discard_count} card(s)."
+            )
+            continue
+
+        if len(set(indexes)) != len(indexes):
+            print("Do not choose the same card twice.")
+            continue
+
+        if any(
+            index < 0 or index >= len(hand)
+            for index in indexes
+        ):
+            print("One or more card indexes are invalid.")
+            continue
+
+        return [hand[index] for index in indexes]
+
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
@@ -706,6 +772,7 @@ def start_client(player_id, deck_list, verbose=False):
                 not priority_grant_received.is_set()
                 and not attackers_request_received.is_set()
                 and not blockers_request_received.is_set()
+                and not discard_request_received.is_set()
             ):
                 time.sleep(0.05)
 
@@ -761,6 +828,34 @@ def start_client(player_id, deck_list, verbose=False):
                 print(
                     f"[CLIENT] Declared "
                     f"{len(blockers)} blocker(s)."
+                )
+
+                continue
+
+            if discard_request_received.is_set():
+                discard_request_received.clear()
+
+                card_ids = prompt_cleanup_discard(
+                    latest_hand,
+                    ui
+                )
+
+                discard_pdu = {
+                    "type": "DISCARD",
+                    "seq_num": latest_cleanup_seq,
+                    "card_ids": card_ids
+                }
+
+                send_pdu(
+                    client_sock,
+                    discard_pdu,
+                    VERBOSE,
+                    "DISCARD to Server"
+                )
+
+                print(
+                    f"[CLIENT] Discarded "
+                    f"{len(card_ids)} card(s)."
                 )
 
                 continue
