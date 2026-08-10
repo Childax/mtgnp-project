@@ -21,6 +21,8 @@ mulligan_state_received = threading.Event()
 latest_priority_seq = 0
 priority_grant_received = threading.Event()
 latest_phase = "LOBBY"
+latest_hand = []
+latest_active_player = None
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -53,6 +55,7 @@ def listen_for_messages(sock, ui=None):
     global last_pong_time, latest_server_seq
     global latest_mulligan_hand, latest_mulligan_count
     global latest_priority_seq, latest_phase
+    global latest_hand, latest_active_player
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -82,6 +85,17 @@ def listen_for_messages(sock, ui=None):
                     state = pdu.get("state", {})
                     phase = state.get("phase")
 
+                    latest_phase = phase or latest_phase
+                    latest_active_player = state.get(
+                        "active_player",
+                        latest_active_player
+                    )
+
+                    if ui:
+                        latest_hand = list(
+                            state.get("hand", {}).get(ui.player_id, [])
+                        )
+
                     if phase == "LOBBY":
                         players_ready = state.get("players_ready", 0)
                         waiting_for = state.get("waiting_for", [])
@@ -106,9 +120,13 @@ def listen_for_messages(sock, ui=None):
                                 )
 
                             mulligan_state_received.set()
-                            
+
                 elif pdu_type == "PHASE_TRANSITION":
                     latest_phase = pdu.get("to_phase", latest_phase)
+                    latest_active_player = pdu.get(
+                        "active_player",
+                        latest_active_player
+                    )
 
                     print(
                         f"\n[CLIENT] Phase changed: "
@@ -197,6 +215,49 @@ def prompt_cards_to_bottom(hand, count):
             continue
 
         return [hand[index] for index in indexes]
+
+def prompt_land_to_play(hand, ui):
+    """Ask the player which land card to play."""
+    land_options = []
+
+    for index, card_id in enumerate(hand):
+        card_info = ui.catalog.get(card_id, {})
+
+        if str(card_info.get("type", "")).lower() == "land":
+            land_options.append((index, card_id))
+
+    if not land_options:
+        print("[CLIENT] You have no land cards in your hand.")
+        return None
+
+    print("\nLand cards in your hand:")
+
+    for index, card_id in land_options:
+        print(
+            f"  [{index}] {ui.get_card_name(card_id)} "
+            f"({card_id})"
+        )
+
+    while True:
+        choice = input(
+            "Choose the hand index of the land to play "
+            "(or type 'cancel'): "
+        ).strip().lower()
+
+        if choice == "cancel":
+            return None
+
+        try:
+            index = int(choice)
+        except ValueError:
+            print("Please enter a valid card index.")
+            continue
+
+        for land_index, card_id in land_options:
+            if index == land_index:
+                return card_id
+
+        print("That index is not a land card.")
 
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
@@ -308,26 +369,71 @@ def start_client(player_id, deck_list, verbose=False):
             priority_grant_received.clear()
 
             while True:
-                action = input("\nType 'pass' to pass priority: ").strip().lower()
+                can_play_land = (
+                    latest_active_player == player_id
+                    and latest_phase in {
+                        "PRECOMBAT_MAIN",
+                        "POSTCOMBAT_MAIN"
+                    }
+                )
+
+                if can_play_land:
+                    action = input(
+                        "\nChoose action [pass/land]: "
+                    ).strip().lower()
+                else:
+                    action = input(
+                        "\nType 'pass' to pass priority: "
+                    ).strip().lower()
 
                 if action == "pass":
+                    pass_pdu = {
+                        "type": "PRIORITY_PASS",
+                        "seq_num": latest_priority_seq
+                    }
+
+                    send_pdu(
+                        client_sock,
+                        pass_pdu,
+                        VERBOSE,
+                        "PRIORITY_PASS to Server"
+                    )
+
+                    print("[CLIENT] Priority passed.")
                     break
 
-                print("For now, the available action is: pass")
+                if action == "land" and can_play_land:
+                    card_id = prompt_land_to_play(
+                        latest_hand,
+                        ui
+                    )
 
-            pass_pdu = {
-                "type": "PRIORITY_PASS",
-                "seq_num": latest_priority_seq
-            }
+                    if card_id is None:
+                        continue
 
-            send_pdu(
-                client_sock,
-                pass_pdu,
-                VERBOSE,
-                "PRIORITY_PASS to Server"
-            )
+                    land_pdu = {
+                        "type": "PLAY_LAND",
+                        "seq_num": latest_priority_seq,
+                        "card_id": card_id
+                    }
 
-            print("[CLIENT] Priority passed.")
+                    send_pdu(
+                        client_sock,
+                        land_pdu,
+                        VERBOSE,
+                        "PLAY_LAND to Server"
+                    )
+
+                    print(
+                        f"[CLIENT] Requested to play "
+                        f"{ui.get_card_name(card_id)}."
+                    )
+                    break
+
+                if can_play_land:
+                    print("Available actions: pass, land")
+                else:
+                    print("Available action: pass")
     except KeyboardInterrupt:
         pass
     finally:
