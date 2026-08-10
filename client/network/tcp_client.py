@@ -29,6 +29,8 @@ latest_phase_seq = 0
 attackers_request_received = threading.Event()
 blockers_request_received = threading.Event()
 latest_attackers = []
+latest_combat_blockers = {}
+damage_order_request_received = threading.Event()
 latest_cleanup_seq = 0
 discard_request_received = threading.Event()
 game_over_received = threading.Event()
@@ -68,6 +70,7 @@ def listen_for_messages(sock, ui=None):
     global latest_battlefield, latest_life_totals
     global latest_phase_seq
     global latest_attackers
+    global latest_combat_blockers
     global latest_cleanup_seq
     try:
         while True:
@@ -165,6 +168,9 @@ def listen_for_messages(sock, ui=None):
                         latest_life_totals
                     )
 
+                    if "combat_blockers" in state:
+                        latest_combat_blockers = state["combat_blockers"]
+
                     if phase == "LOBBY":
                         players_ready = state.get("players_ready", 0)
                         waiting_for = state.get("waiting_for", [])
@@ -216,6 +222,13 @@ def listen_for_messages(sock, ui=None):
                         and latest_active_player != ui.player_id
                     ):
                         blockers_request_received.set()
+
+                    if (
+                        ui
+                        and latest_phase == "ASSIGN_DAMAGE_ORDER"
+                        and latest_active_player == ui.player_id
+                    ):
+                        damage_order_request_received.set()
 
                 elif pdu_type == "PRIORITY_GRANT":
                     latest_priority_seq = pdu.get("seq_num", 0)
@@ -634,6 +647,64 @@ def prompt_blockers(player_id, ui):
 
         print("[CLIENT] Block assignment added.")
 
+def prompt_damage_orders(ui):
+    """Ask the active player to order blockers for multi-blocked attackers."""
+    assignments = []
+
+    for attacker_id, blocker_ids in latest_combat_blockers.items():
+        if len(blocker_ids) < 2:
+            continue
+
+        print(
+            f"\nDamage order for "
+            f"{ui.get_card_name(attacker_id)} "
+            f"({attacker_id}):"
+        )
+
+        for index, blocker_id in enumerate(blocker_ids):
+            print(
+                f"  [{index}] {ui.get_card_name(blocker_id)} "
+                f"({blocker_id})"
+            )
+
+        while True:
+            choice = input(
+                "Enter blocker indexes in damage order "
+                "(example: 1 0): "
+            ).strip()
+
+            try:
+                indexes = [
+                    int(value)
+                    for value in choice.split()
+                ]
+            except ValueError:
+                print("Please enter blocker indexes using numbers only.")
+                continue
+
+            expected_indexes = set(range(len(blocker_ids)))
+
+            if (
+                len(indexes) != len(blocker_ids)
+                or set(indexes) != expected_indexes
+            ):
+                print(
+                    "Enter every blocker index exactly once."
+                )
+                continue
+
+            assignments.append({
+                "attacker_id": attacker_id,
+                "blocker_order": [
+                    blocker_ids[index]
+                    for index in indexes
+                ]
+            })
+
+            break
+
+    return assignments
+
 def prompt_cleanup_discard(hand, ui):
     """Ask the active player which excess cards to discard."""
     discard_count = len(hand) - 7
@@ -810,6 +881,7 @@ def start_client(player_id, deck_list, verbose=False):
                 not priority_grant_received.is_set()
                 and not attackers_request_received.is_set()
                 and not blockers_request_received.is_set()
+                and not damage_order_request_received.is_set()
                 and not discard_request_received.is_set()
                 and not game_over_received.is_set()
             ):
@@ -905,6 +977,33 @@ def start_client(player_id, deck_list, verbose=False):
                     f"[CLIENT] Declared "
                     f"{len(blockers)} blocker(s)."
                 )
+
+                continue
+
+            if damage_order_request_received.is_set():
+                damage_order_request_received.clear()
+
+                damage_orders = prompt_damage_orders(ui)
+
+                for assignment in damage_orders:
+                    damage_order_pdu = {
+                        "type": "ASSIGN_DAMAGE_ORDER",
+                        "seq_num": latest_phase_seq,
+                        "attacker_id": assignment["attacker_id"],
+                        "blocker_order": assignment["blocker_order"]
+                    }
+
+                    send_pdu(
+                        client_sock,
+                        damage_order_pdu,
+                        VERBOSE,
+                        "ASSIGN_DAMAGE_ORDER to Server"
+                    )
+
+                    print(
+                        f"[CLIENT] Damage order assigned for "
+                        f"{ui.get_card_name(assignment['attacker_id'])}."
+                    )
 
                 continue
 

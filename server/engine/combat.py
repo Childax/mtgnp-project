@@ -176,7 +176,23 @@ class CombatManager:
             self.blockers[entry["blocking_id"]].append(entry["creature_id"])
             # Blocking does not tap the blocker (RFC 9.4).
 
-        broadcast_personalized_state(self.state, self.send_fn)
+        for pid in self.state.players:
+            visible_state = self.state.to_personalized_dict(pid)
+
+            visible_state["combat_blockers"] = {
+                attacker_id: list(blocker_ids)
+                for attacker_id, blocker_ids in self.blockers.items()
+            }
+
+            blocker_update = build_game_state_update(
+                self.state.next_seq(),
+                visible_state
+            )
+
+            self.send_fn(
+                pid,
+                blocker_update
+            )
 
         self.any_multi_blocked = any(len(bs) >= 2 for bs in self.blockers.values())
         self.any_first_or_double_strike = getattr(self, "_fs_ds_seen", False) or \
