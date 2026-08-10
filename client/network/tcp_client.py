@@ -20,6 +20,7 @@ latest_mulligan_count = 0
 mulligan_state_received = threading.Event()
 latest_priority_seq = 0
 priority_grant_received = threading.Event()
+latest_phase = "LOBBY"
 
 def heartbeat_loop(sock):
     seq_num = 9000 
@@ -51,7 +52,7 @@ def heartbeat_loop(sock):
 def listen_for_messages(sock, ui=None):
     global last_pong_time, latest_server_seq
     global latest_mulligan_hand, latest_mulligan_count
-    global latest_priority_seq
+    global latest_priority_seq, latest_phase
     try:
         while True:
             length_prefix = receive_exact(sock, 4)
@@ -105,6 +106,15 @@ def listen_for_messages(sock, ui=None):
                                 )
 
                             mulligan_state_received.set()
+                            
+                elif pdu_type == "PHASE_TRANSITION":
+                    latest_phase = pdu.get("to_phase", latest_phase)
+
+                    print(
+                        f"\n[CLIENT] Phase changed: "
+                        f"{pdu.get('from_phase')} -> {latest_phase}"
+                    )
+
                 elif pdu_type == "PRIORITY_GRANT":
                     latest_priority_seq = pdu.get("seq_num", 0)
 
