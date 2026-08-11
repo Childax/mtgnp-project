@@ -156,12 +156,26 @@ def trigger_forfeit(player_id):
 def handle_client(conn, addr, player_id):
     global current_game_state, turn_manager, stack_manager, priority_manager, combat_manager
     print(f"[SERVER] Player {player_id} connected from {addr}")
-    
+
+    is_reconnect = (
+        player_id in sessions
+        and not sessions[player_id].get("connected", False)
+        and current_game_state is not None
+    )
+
     if player_id in sessions and sessions[player_id].get("timer"):
         sessions[player_id]["timer"].cancel()
         print(f"[SERVER] Reconnect timer for Player {player_id} cancelled.")
-        
-    sessions[player_id] = {"conn": conn, "connected": True, "timer": None}
+
+    sessions[player_id] = {
+        "conn": conn,
+        "connected": True,
+        "timer": None,
+        "is_reconnect": is_reconnect
+    }
+
+    if is_reconnect:
+        print(f"[SERVER] Player {player_id} is reconnecting to the active game.")
 
     try:
         while True:
@@ -200,6 +214,74 @@ def handle_client(conn, addr, player_id):
                     continue
 
                 if pdu.type == "PLAYER_READY":
+
+                    if sessions[player_id].get("is_reconnect"):
+                        expected_player_id = (
+                            lobby.ready_players
+                            .get(player_id, {})
+                            .get("player_id")
+                        )
+
+                        if pdu.player_id != expected_player_id:
+                            error_msg = {
+                                "type": "ERROR",
+                                "seq_num": pdu.seq_num,
+                                "code": "ILLEGAL_ACTION",
+                                "message": (
+                                    f"Reconnect identity mismatch. "
+                                    f"Expected {expected_player_id}."
+                                ),
+                                "rejected_action": raw_dict
+                            }
+
+                            send_pdu(
+                                conn,
+                                error_msg,
+                                VERBOSE,
+                                f"ERROR to Player {player_id}"
+                            )
+                            continue
+
+                        personalized_state = (
+                            current_game_state.to_personalized_dict(
+                                expected_player_id
+                            )
+                        )
+
+                        reconnect_update = {
+                            "type": "GAME_STATE_UPDATE",
+                            "seq_num": current_game_state.next_seq(),
+                            "state": personalized_state
+                        }
+
+                        send_pdu(
+                            conn,
+                            reconnect_update,
+                            VERBOSE,
+                            f"RECONNECT STATE to Player {player_id}"
+                        )
+
+                        sessions[player_id]["is_reconnect"] = False
+
+                        print(
+                            f"[SERVER] Player {player_id} resumed "
+                            "the existing game state."
+                        )
+
+                        if (
+                            priority_manager is not None
+                            and current_game_state.priority_holder
+                            == expected_player_id
+                        ):
+                            priority_manager.reissue_current_priority(expected_player_id)
+
+                            print(
+                                f"[SERVER] Priority restored to "
+                                f"{expected_player_id} after reconnect."
+                            )
+
+                        continue
+
                     success, status, data = lobby.process_player_ready(player_id, pdu)
                     
                     if not success:

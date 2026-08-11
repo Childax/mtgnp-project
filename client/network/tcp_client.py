@@ -39,6 +39,7 @@ damage_order_request_received = threading.Event()
 latest_cleanup_seq = 0
 discard_request_received = threading.Event()
 game_over_received = threading.Event()
+reconnect_state_received = threading.Event()
 
 def buffered_verbose_print(*lines):
     """Print verbose logs immediately, or buffer them while input is active."""
@@ -158,6 +159,9 @@ def listen_for_messages(sock, ui=None):
                         "active_player",
                         latest_active_player
                     )
+
+                    if phase not in {"LOBBY", "MULLIGAN", "GAME_SETUP"}:
+                        reconnect_state_received.set()
 
                     if ui:
                         latest_hand = list(
@@ -857,6 +861,7 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
     """Send PLAYER_READY and complete the mulligan phase."""
 
     mulligan_state_received.clear()
+    reconnect_state_received.clear()
 
     ready_pdu = {
         "type": "PLAYER_READY",
@@ -876,7 +881,40 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
     print("[CLIENT] Waiting for opening hand...")
 
     while True:
-        mulligan_state_received.wait()
+        while (
+            not mulligan_state_received.is_set()
+            and not reconnect_state_received.is_set()
+        ):
+            time.sleep(0.05)
+
+        if reconnect_state_received.is_set():
+            reconnect_state_received.clear()
+
+            print(
+                "[CLIENT] Existing game state restored. "
+                "Reconnection successful."
+            )
+
+            if (
+                latest_phase == "DECLARE_ATTACKERS"
+                and latest_active_player == player_id
+            ):
+                attackers_request_received.set()
+
+            elif (
+                latest_phase == "DECLARE_BLOCKERS"
+                and latest_active_player != player_id
+            ):
+                blockers_request_received.set()
+
+            elif (
+                latest_phase == "ASSIGN_DAMAGE_ORDER"
+                and latest_active_player == player_id
+            ):
+                damage_order_request_received.set()
+
+            return
+
         mulligan_state_received.clear()
 
         while True:
