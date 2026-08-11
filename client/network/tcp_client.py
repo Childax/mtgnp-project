@@ -5,6 +5,7 @@ import time
 import argparse
 import sys
 import os
+import builtins
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from shared.network_utils import receive_exact, send_pdu
@@ -13,6 +14,9 @@ from client.ui.battlefield import BattlefieldUI
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
+input_active = False
+verbose_buffer = []
+verbose_lock = threading.Lock()
 last_pong_time = time.time()
 latest_server_seq = 0
 latest_mulligan_hand = []
@@ -36,6 +40,43 @@ latest_cleanup_seq = 0
 discard_request_received = threading.Event()
 game_over_received = threading.Event()
 
+def buffered_verbose_print(*lines):
+    """Print verbose logs immediately, or buffer them while input is active."""
+    global input_active
+
+    if not VERBOSE:
+        return
+
+    with verbose_lock:
+        if input_active:
+            verbose_buffer.extend(lines)
+        else:
+            for line in lines:
+                print(line)
+
+
+def client_input(prompt=""):
+    """Input wrapper that prevents verbose logs from interrupting prompts."""
+    global input_active
+
+    with verbose_lock:
+        input_active = True
+
+    try:
+        return builtins.input(prompt)
+
+    finally:
+        with verbose_lock:
+            input_active = False
+
+            if verbose_buffer:
+                print()
+
+                for line in verbose_buffer:
+                    print(line)
+
+                verbose_buffer.clear()
+
 def heartbeat_loop(sock):
     seq_num = 9000 
     global last_pong_time
@@ -49,7 +90,14 @@ def heartbeat_loop(sock):
                 "seq_num": seq_num,
                 "timestamp": int(ping_send_time * 1000)
             }
-            send_pdu(sock, pdu, VERBOSE, "to Server")
+            json_data = json.dumps(pdu).encode("utf-8")
+
+            buffered_verbose_print(
+                f"\n[VERBOSE] SENT to Server | {len(json_data)} bytes",
+                f"[VERBOSE] RAW: {json_data.decode('utf-8')}"
+            )
+
+            send_pdu(sock, pdu, False, "to Server")
             
             time.sleep(10)
             
@@ -88,9 +136,10 @@ def listen_for_messages(sock, ui=None):
             if payload_bytes:
                 payload_str = payload_bytes.decode('utf-8')
                 
-                if VERBOSE:
-                    print(f"\n[VERBOSE] RECV from Server | {message_length} bytes")
-                    print(f"[VERBOSE] RAW: {payload_str}")
+                buffered_verbose_print(
+                    f"\n[VERBOSE] RECV from Server | {message_length} bytes",
+                    f"[VERBOSE] RAW: {payload_str}"
+                )
                     
                 pdu = json.loads(payload_str)
                 
@@ -358,7 +407,7 @@ def prompt_cards_to_bottom(hand, count):
         return []
 
     while True:
-        raw_indexes = input(
+        raw_indexes = client_input(
             f"Choose {count} card index(es) to put on the bottom "
             "(separated by spaces): "
         ).strip()
@@ -406,7 +455,7 @@ def prompt_land_to_play(hand, ui):
         )
 
     while True:
-        choice = input(
+        choice = client_input(
             "Choose the hand index of the land to play "
             "(or type 'cancel'): "
         ).strip().lower()
@@ -449,7 +498,7 @@ def prompt_creature_to_cast(hand, ui):
         )
 
     while True:
-        choice = input(
+        choice = client_input(
             "Choose the hand index of the creature to cast "
             "(or type 'cancel'): "
         ).strip().lower()
@@ -504,7 +553,7 @@ def prompt_spell_target(ui, creature_only=False):
         print(f"  [{index}] {description}")
 
     while True:
-        choice = input(
+        choice = client_input(
             "Choose target index (or type 'cancel'): "
         ).strip().lower()
 
@@ -555,7 +604,7 @@ def prompt_attackers(player_id, ui):
         )
 
     while True:
-        choice = input(
+        choice = client_input(
             "Choose attacker index(es), separated by spaces "
             "(or press Enter for no attack): "
         ).strip()
@@ -641,7 +690,7 @@ def prompt_blockers(player_id, ui):
     used_blockers = set()
 
     while True:
-        choice = input(
+        choice = client_input(
             "Choose blocker index "
             "(or press Enter when finished): "
         ).strip()
@@ -666,7 +715,7 @@ def prompt_blockers(player_id, ui):
             print("That creature is already blocking.")
             continue
 
-        target_choice = input(
+        target_choice = client_input(
             "Choose attacker index to block: "
         ).strip()
 
@@ -713,7 +762,7 @@ def prompt_damage_orders(ui):
             )
 
         while True:
-            choice = input(
+            choice = client_input(
                 "Enter blocker indexes in damage order "
                 "(example: 1 0): "
             ).strip()
@@ -771,7 +820,7 @@ def prompt_cleanup_discard(hand, ui):
         )
 
     while True:
-        choice = input(
+        choice = client_input(
             f"Choose exactly {discard_count} card index(es) "
             "to discard, separated by spaces: "
         ).strip()
@@ -831,7 +880,7 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
         mulligan_state_received.clear()
 
         while True:
-            choice = input(
+            choice = client_input(
                 "\nKeep or mulligan? [K/M]: "
             ).strip().upper()
 
@@ -942,7 +991,7 @@ def start_client(player_id, deck_list, verbose=False):
                 latest_attackers.clear()
 
                 while True:
-                    play_again = input(
+                    play_again = client_input(
                         "\nPlay another game? [Y/N]: "
                     ).strip().upper()
 
@@ -1139,7 +1188,7 @@ def start_client(player_id, deck_list, verbose=False):
 
                 actions.append("concede")
 
-                action = input(
+                action = client_input(
                     f"\nChoose action [{'/' .join(actions)}]: "
                 ).strip().lower()
 
@@ -1290,7 +1339,7 @@ def start_client(player_id, deck_list, verbose=False):
                         )
 
                     while True:
-                        choice = input(
+                        choice = client_input(
                             "Choose the hand index of the spell to cast "
                             "(or type 'cancel'): "
                         ).strip().lower()

@@ -1,3 +1,5 @@
+import argparse
+
 from client.network.tcp_client import start_client
 
 TEST_DECKS = {
@@ -49,6 +51,17 @@ def prompt_deck():
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="MTGNP Client"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    args = parser.parse_args()
+
     print("=== MTGNP Client Setup ===")
 
     player_id = prompt_player_id()
@@ -61,7 +74,11 @@ def main():
     
     input("\nPress Enter when you are ready...")
     print("\nConnecting to the game server...")
-    start_client(player_id, deck_list)
+    start_client(
+        player_id,
+        deck_list,
+        verbose=args.verbose
+    )
     
 
 if __name__ == "__main__":
