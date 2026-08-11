@@ -6,6 +6,7 @@ import argparse
 import sys
 import os
 import builtins
+import struct
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from shared.network_utils import receive_exact, send_pdu
@@ -39,6 +40,7 @@ damage_order_request_received = threading.Event()
 latest_cleanup_seq = 0
 discard_request_received = threading.Event()
 game_over_received = threading.Event()
+connection_lost_received = threading.Event()
 reconnect_state_received = threading.Event()
 
 def buffered_verbose_print(*lines):
@@ -103,9 +105,20 @@ def heartbeat_loop(sock):
             time.sleep(10)
             
             if last_pong_time < ping_send_time:
-                print("\n[CLIENT] FATAL ERROR: Server heartbeat timeout. No PONG received within 10 seconds.")
-                sock.close() 
-                sys.exit(1)
+                print(
+                    "\n[CLIENT] FATAL ERROR: Server heartbeat timeout. "
+                    "No PONG received within 10 seconds."
+                )
+
+                connection_lost_received.set()
+
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+                sock.close()
+                return
                 
             seq_num += 1
             
@@ -128,9 +141,9 @@ def listen_for_messages(sock, ui=None):
             length_prefix = receive_exact(sock, 4)
             if not length_prefix:
                 print("\n[CLIENT] Disconnected from server.")
+                connection_lost_received.set()
                 break
             
-            import struct
             message_length = struct.unpack('>I', length_prefix)[0]
 
             if message_length > 65535:
@@ -374,8 +387,11 @@ def listen_for_messages(sock, ui=None):
                     print(f"\n[CLIENT] Received {pdu_type} PDU")
                 
     except (ConnectionResetError, json.JSONDecodeError, struct.error, OSError):
+        connection_lost_received.set()
+
         if not game_over_received.is_set():
             print("\n[CLIENT] Connection closed or network error occurred.")
+
         return
 
 def main():
@@ -892,8 +908,12 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
         while (
             not mulligan_state_received.is_set()
             and not reconnect_state_received.is_set()
+            and not connection_lost_received.is_set()
         ):
             time.sleep(0.05)
+
+        if connection_lost_received.is_set():
+            return False
 
         if reconnect_state_received.is_set():
             reconnect_state_received.clear()
@@ -975,6 +995,7 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
 
         print("[CLIENT] Sent MULLIGAN_CHOICE: KEEP.")
         break
+    return True
 
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
@@ -1009,11 +1030,15 @@ def start_client(player_id, deck_list, verbose=False):
     )
     listener_thread.start()
 
-    run_lobby_and_mulligan(
+    lobby_completed = run_lobby_and_mulligan(
         client_sock,
         player_id,
         deck_list
     )
+
+    if not lobby_completed:
+        print("[CLIENT] Connection lost. Closing client.")
+        return
 
     try:
         while True:
@@ -1024,8 +1049,13 @@ def start_client(player_id, deck_list, verbose=False):
                 and not damage_order_request_received.is_set()
                 and not discard_request_received.is_set()
                 and not game_over_received.is_set()
+                and not connection_lost_received.is_set()
             ):
                 time.sleep(0.05)
+
+            if connection_lost_received.is_set():
+                print("[CLIENT] Connection lost. Closing client.")
+                break
 
             if game_over_received.is_set():
 
@@ -1056,11 +1086,15 @@ def start_client(player_id, deck_list, verbose=False):
                     "on the same connection..."
                 )
 
-                run_lobby_and_mulligan(
+                lobby_completed = run_lobby_and_mulligan(
                     client_sock,
                     player_id,
                     deck_list
                 )
+
+                if not lobby_completed:
+                    print("[CLIENT] Connection lost. Closing client.")
+                    break
 
                 continue
 
