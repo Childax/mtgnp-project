@@ -1117,20 +1117,31 @@ def start_client(player_id, deck_list, verbose=False):
                     for card_id in latest_hand
                 )
 
+                ability_sources = [
+                    permanent.get("id")
+                    for permanent in latest_battlefield.get(player_id, [])
+                    if str(permanent.get("id", "")).startswith(
+                        "llanowar_elves_"
+                    )
+                ]
+
+                has_supported_ability = bool(ability_sources)
+
+                actions = ["pass"]
+
                 if can_play_land:
-                    action = input(
-                        "\nChoose action [pass/land/cast/concede]: "
-                    ).strip().lower()
-
+                    actions.extend(["land", "cast"])
                 elif has_supported_instant:
-                    action = input(
-                        "\nChoose action [pass/cast/concede]: "
-                    ).strip().lower()
+                    actions.append("cast")
 
-                else:
-                    action = input(
-                        "\nChoose action [pass/concede]: "
-                    ).strip().lower()
+                if has_supported_ability:
+                    actions.append("ability")
+
+                actions.append("concede")
+
+                action = input(
+                    f"\nChoose action [{'/' .join(actions)}]: "
+                ).strip().lower()
 
                 if action == "concede":
                     concede_pdu = {
@@ -1165,6 +1176,40 @@ def start_client(player_id, deck_list, verbose=False):
                     )
 
                     print("[CLIENT] Priority passed.")
+                    break
+
+                if action == "ability" and has_supported_ability:
+                    source_id = ability_sources[0]
+
+                    ability_pdu = {
+                        "type": "ACTIVATE_ABILITY",
+                        "seq_num": latest_priority_seq,
+                        "source_id": source_id,
+                        "ability_index": 0,
+                        "targets": [],
+                        "cost_payment": {
+                            "tap": True,
+                            "mana": {}
+                        }
+                    }
+
+                    send_pdu(
+                        client_sock,
+                        ability_pdu,
+                        VERBOSE,
+                        "ACTIVATE_ABILITY to Server"
+                    )
+
+                    ui.set_status(
+                        f"Requested ability of "
+                        f"{ui.get_card_name(source_id)}."
+                    )
+
+                    print(
+                        f"[CLIENT] Requested ability of "
+                        f"{ui.get_card_name(source_id)}."
+                    )
+
                     break
 
                 if action == "land" and can_play_land:

@@ -172,6 +172,12 @@ class StackManager:
             mana_paid=mana_cost,
         )
         self._push(item)
+
+        broadcast_personalized_state(
+            self.state,
+            self.send_fn
+        )
+
         self.reopen_priority_for_actor(player_id)
 
     def _can_pay(self, player, declared_payment: dict, required_cost: Optional[dict] = None) -> bool:
