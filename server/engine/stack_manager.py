@@ -310,9 +310,9 @@ class StackManager:
            it's implemented here directly rather than deferred.
 
         2. One-off effects (INSTANT / SORCERY / ACTIVATE_ABILITY effects
-           like direct damage, life gain, bounce, destroy, counter):
-           these ARE card-specific (CARD-01..05) and remain a TODO stub
-           here, to be filled in by whoever owns that ticket.
+        like direct damage, buffs, bounce, destroy, and counter):
+        these are dispatched through card_effects.py's EFFECT_REGISTRY
+        and synchronized back into the authoritative GameState.
         """
         card_info = self.card_catalog.get(item.source_id, {})
         card_type = str(card_info.get("type", "")).upper()

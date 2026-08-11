@@ -1,3 +1,10 @@
+"""
+Interactive launcher for the MTGNP client.
+
+Collects the player's ID and test deck selection, handles the optional
+verbose flag, and starts the TCP client session.
+"""
+
 import argparse
 
 from client.network.tcp_client import start_client

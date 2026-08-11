@@ -1,3 +1,14 @@
+"""
+MTGNP TCP client implementation.
+
+Handles the client-side network connection, heartbeat monitoring,
+server PDU processing, reconnect state restoration, user prompts,
+and construction of gameplay PDUs.
+
+The server remains authoritative: this client renders received state
+and sends player requests without independently determining game results.
+"""
+
 import socket
 import json
 import threading
@@ -12,6 +23,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 from shared.network_utils import receive_exact, send_pdu
 from client.ui.battlefield import BattlefieldUI
 
+# ---------------------------------------------------------------------------
+# Client configuration and shared runtime state
+# ---------------------------------------------------------------------------
+# These values are updated by the listener thread as authoritative PDUs arrive
+# from the server. Threading events wake the main input loop when the client
+# needs to respond to priority, combat, mulligan, reconnect, or game-over state.
 HOST = '127.0.0.1'
 PORT = 4444
 VERBOSE = False
@@ -43,6 +60,12 @@ game_over_received = threading.Event()
 connection_lost_received = threading.Event()
 reconnect_state_received = threading.Event()
 
+# ---------------------------------------------------------------------------
+# Console input and verbose-log synchronization
+# ---------------------------------------------------------------------------
+# Network and heartbeat threads may receive PDUs while the user is typing.
+# Verbose messages are temporarily buffered during input so background logs
+# do not overwrite or split interactive prompts.
 def buffered_verbose_print(*lines):
     """Print verbose logs immediately, or buffer them while input is active."""
     global input_active
@@ -80,6 +103,12 @@ def client_input(prompt=""):
 
                 verbose_buffer.clear()
 
+# ---------------------------------------------------------------------------
+# Background network threads
+# ---------------------------------------------------------------------------
+# The heartbeat thread periodically checks server liveness using PING/PONG.
+# The listener thread continuously reads framed PDUs, updates authoritative
+# client-side state, and signals the main loop when player input is required.
 def heartbeat_loop(sock):
     seq_num = 9000 
     global last_pong_time
@@ -429,6 +458,13 @@ def main():
         print("\n[CLIENT] Closing connection.")
         client_sock.close()
 
+# ---------------------------------------------------------------------------
+# Interactive input helpers
+# ---------------------------------------------------------------------------
+# These functions collect and validate user choices for mulligans, land plays,
+# spell targets, combat declarations, damage order, and cleanup discards.
+# They only build player requests; the server remains responsible for enforcing
+# the actual game rules and accepting or rejecting each action.
 def prompt_cards_to_bottom(hand, count):
     """Ask the player which cards to place at the bottom after mulligans."""
     if count == 0:
@@ -997,6 +1033,13 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
         break
     return True
 
+# ---------------------------------------------------------------------------
+# Client session and gameplay loop
+# ---------------------------------------------------------------------------
+# Establishes the TCP session, starts background network threads, completes
+# lobby/mulligan handling, and drives player actions based on server events.
+# Reconnects restore the latest authoritative state rather than starting a
+# new game, while connection-loss events terminate the client cleanly.
 def start_client(player_id, deck_list, verbose=False):
     """Connects the configured player and sends PLAYER_READY."""
     global VERBOSE, last_pong_time
