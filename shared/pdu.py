@@ -71,6 +71,16 @@ class PlayerReadyPDU(BasePDU):
     player_id: str
     deck_list: List[str]
 
+    @field_validator('player_id')
+    @classmethod
+    def validate_player_id(cls, player_id: str) -> str:
+        if not player_id.strip():
+            raise ValueError(
+                "player_id must be a non-empty string."
+            )
+
+        return player_id
+
     @field_validator('deck_list')
     @classmethod
     def validate_deck(cls, deck: List[str]) -> List[str]:
