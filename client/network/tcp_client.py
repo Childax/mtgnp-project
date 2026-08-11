@@ -132,6 +132,14 @@ def listen_for_messages(sock, ui=None):
             
             import struct
             message_length = struct.unpack('>I', length_prefix)[0]
+
+            if message_length > 65535:
+                print(
+                    "\n[CLIENT] FATAL ERROR: "
+                    "Incoming PDU exceeds maximum size of 65,535 bytes."
+                )
+                break
+
             payload_bytes = receive_exact(sock, message_length)
             
             if payload_bytes:

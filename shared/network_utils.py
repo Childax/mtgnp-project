@@ -16,6 +16,12 @@ def send_pdu(sock, pdu_dict, verbose=False, log_label=""):
     try:
         json_data = json.dumps(pdu_dict).encode('utf-8')
         message_length = len(json_data)
+
+        if message_length > 65535:
+            raise ValueError(
+                f"PDU exceeds maximum size of 65,535 bytes "
+                f"({message_length} bytes)."
+            )
         
         if verbose:
             print(f"\n[VERBOSE] SENT {log_label} | {message_length} bytes")
