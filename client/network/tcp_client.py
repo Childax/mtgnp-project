@@ -977,7 +977,7 @@ def run_lobby_and_mulligan(client_sock, player_id, deck_list):
             ):
                 damage_order_request_received.set()
 
-            return
+            return True
 
         mulligan_state_received.clear()
 
@@ -1272,12 +1272,28 @@ def start_client(player_id, deck_list, verbose=False):
             priority_grant_received.clear()
 
             while True:
-                can_play_land = (
+                is_main_phase = (
                     latest_active_player == player_id
                     and latest_phase in {
                         "PRECOMBAT_MAIN",
                         "POSTCOMBAT_MAIN"
                     }
+                )
+
+                stack_is_empty = not latest_game_state.get("stack", [])
+
+                can_play_land = (
+                    is_main_phase
+                    and stack_is_empty
+                    and not latest_game_state.get(
+                        "land_played_this_turn",
+                        False
+                    )
+                )
+
+                can_cast_sorcery_speed = (
+                    is_main_phase
+                    and stack_is_empty
                 )
 
                 has_supported_instant = any(
@@ -1302,8 +1318,9 @@ def start_client(player_id, deck_list, verbose=False):
                 actions = ["pass"]
 
                 if can_play_land:
-                    actions.extend(["land", "cast"])
-                elif has_supported_instant:
+                    actions.append("land")
+
+                if can_cast_sorcery_speed or has_supported_instant:
                     actions.append("cast")
 
                 if has_supported_ability:
@@ -1417,7 +1434,7 @@ def start_client(player_id, deck_list, verbose=False):
                     break
 
                 if action == "cast" and (
-                    can_play_land
+                    can_cast_sorcery_speed
                     or has_supported_instant
                 ):
                     cast_options = []
@@ -1426,7 +1443,7 @@ def start_client(player_id, deck_list, verbose=False):
                         card_info = ui.catalog.get(possible_card_id, {})
                         card_type = str(card_info.get("type", "")).lower()
 
-                        if can_play_land:
+                        if can_cast_sorcery_speed:
                             if (
                                 card_type == "creature"
                                 or possible_card_id in {
