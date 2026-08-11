@@ -514,6 +514,7 @@ def main():
                 print(f"[SERVER] Rejected connection from {addr}: Lobby full.")
                 error_msg = {
                     "type": "ERROR",
+                    "seq_num": 0,
                     "code": "LOBBY_FULL",
                     "message": "The server already has two active players."
                 }
