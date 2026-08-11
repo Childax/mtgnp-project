@@ -199,7 +199,9 @@ def handle_client(conn, addr, player_id):
             if VERBOSE:
                 print(f"\n[VERBOSE] RECV from Player {player_id} | {message_length} bytes")
                 print(f"[VERBOSE] RAW: {payload_str}")
-            
+
+            raw_dict = {}
+
             try:
                 raw_dict = json.loads(payload_str)
                 pdu = parse_pdu(raw_dict)
@@ -424,6 +426,22 @@ def handle_client(conn, addr, player_id):
                         pdu, game_player_id, turn_manager, stack_manager,
                         priority_manager, combat_manager,
                     )
+
+            except json.JSONDecodeError as e:
+                error_msg = {
+                    "type": "ERROR",
+                    "seq_num": 0,
+                    "code": "INVALID_JSON",
+                    "message": "Malformed JSON payload.",
+                    "rejected_action": {}
+                }
+
+                send_pdu(
+                    conn,
+                    error_msg,
+                    VERBOSE,
+                    f"ERROR to Player {player_id}"
+                )
 
             except ValidationError as e:
                 print(f"[SERVER] Validation rejected action from Player {player_id}")
